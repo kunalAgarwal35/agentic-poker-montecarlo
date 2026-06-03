@@ -69,10 +69,12 @@ describe('db data layer', () => {
     expect(items[0].id).toBe('a');
     expect(items[0].ts).toBe('2026-06-01T10:00:00.000Z');
     expect(items[0].payload.vizSpecs[0].kind).toBe('equity');
-    // limit is parameterized, not interpolated into the SQL text.
+    // limit/offset are parameterized, not interpolated into the SQL text.
     const sqlText = lastCall().strings.join('?');
     expect(sqlText).toContain('FROM recent_queries');
-    expect(lastCall().values).toContain(30);
+    // Default page is 20 rows from offset 0.
+    expect(lastCall().values).toContain(20);
+    expect(lastCall().values).toContain(0);
   });
 
   it('addRecent generates an id and builds payload from vizSpecs', async () => {

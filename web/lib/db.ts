@@ -86,13 +86,19 @@ function toIso(ts: any): string | undefined {
   return new Date(ts).toISOString();
 }
 
-export async function listRecent(limit = 30): Promise<RecentItem[]> {
+// Keep enough history that the gallery can scroll infinitely.
+const RECENT_CAP = 2000;
+
+export async function listRecent(limit = 20, offset = 0): Promise<RecentItem[]> {
   const db = getSql();
+  // Coerce to safe non-negative integers before binding as template params.
+  const safeLimit = Math.max(0, Math.floor(Number(limit) || 0));
+  const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
   const rows = (await db`
     SELECT id, ts, question, kind, summary, payload
     FROM recent_queries
     ORDER BY ts DESC
-    LIMIT ${limit}
+    LIMIT ${safeLimit} OFFSET ${safeOffset}
   `) as any[];
   return rows.map((r) => ({
     id: r.id,
@@ -126,11 +132,11 @@ export async function addRecent(item: {
     VALUES (${id}, ${item.question}, ${item.kind}, ${summary}, ${JSON.stringify(payload)})
     ON CONFLICT (id) DO NOTHING
   `;
-  // Cap the table: keep only the 60 newest rows.
+  // Cap the table: keep only the RECENT_CAP newest rows.
   await db`
     DELETE FROM recent_queries
     WHERE id NOT IN (
-      SELECT id FROM recent_queries ORDER BY ts DESC LIMIT 60
+      SELECT id FROM recent_queries ORDER BY ts DESC LIMIT ${RECENT_CAP}
     )
   `;
 

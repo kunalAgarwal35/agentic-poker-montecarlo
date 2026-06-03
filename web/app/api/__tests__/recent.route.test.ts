@@ -26,18 +26,19 @@ describe('/api/recent route', () => {
     vi.stubEnv('DATABASE_URL', '');
     vi.stubEnv('POSTGRES_URL', '');
     const { GET } = await loadRoute();
-    const res = await GET();
+    const res = await GET(new Request('http://test/api/recent'));
     const body = await res.json();
     const { SEED_EXAMPLES } = await import('@/lib/seedExamples');
     expect(body.items).toHaveLength(SEED_EXAMPLES.length);
     expect(body.items[0].id).toBe(SEED_EXAMPLES[0].id);
+    expect(body.hasMore).toBe(false);
   });
 
   it('GET with DB but empty table falls back to seed', async () => {
     vi.stubEnv('DATABASE_URL', 'postgres://test');
     nextRows = [];
     const { GET } = await loadRoute();
-    const res = await GET();
+    const res = await GET(new Request('http://test/api/recent'));
     const body = await res.json();
     const { SEED_EXAMPLES } = await import('@/lib/seedExamples');
     expect(body.items).toHaveLength(SEED_EXAMPLES.length);
@@ -56,10 +57,11 @@ describe('/api/recent route', () => {
       },
     ];
     const { GET } = await loadRoute();
-    const res = await GET();
+    const res = await GET(new Request('http://test/api/recent'));
     const body = await res.json();
     expect(body.items).toHaveLength(1);
     expect(body.items[0].id).toBe('row1');
+    expect(body.hasMore).toBe(false);
   });
 
   it('POST without question returns 400', async () => {

@@ -7,17 +7,28 @@ export const runtime = 'nodejs';
 const MAX_QUESTION = 500;
 const MAX_SUMMARY = 1000;
 
-export async function GET() {
+export async function GET(req: Request) {
+  const params = new URL(req.url).searchParams;
+  const limit = Math.min(50, Math.max(1, Number(params.get('limit')) || 20));
+  const offset = Math.max(0, Number(params.get('offset')) || 0);
+
   if (!dbConfigured()) {
-    return Response.json({ items: SEED_EXAMPLES });
+    return Response.json({
+      items: offset === 0 ? SEED_EXAMPLES.slice(0, limit) : [],
+      hasMore: false,
+    });
   }
   try {
     await ensureSchema();
-    const items = await listRecent();
-    return Response.json({ items: items.length ? items : SEED_EXAMPLES });
+    const items = await listRecent(limit, offset);
+    if (offset === 0 && items.length === 0) {
+      // Empty DB on the first page — show seed examples instead.
+      return Response.json({ items: SEED_EXAMPLES.slice(0, limit), hasMore: false });
+    }
+    return Response.json({ items, hasMore: items.length === limit });
   } catch {
-    // Never 500 the homepage — fall back to seed examples.
-    return Response.json({ items: SEED_EXAMPLES });
+    // Never 500 the homepage — fall back to seed examples on the first page.
+    return Response.json({ items: offset === 0 ? SEED_EXAMPLES : [], hasMore: false });
   }
 }
 
