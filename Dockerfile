@@ -34,5 +34,12 @@ COPY score_array.npy category_array.npy \
      holdem_class_order.json plo4_class_order.json plo5_class_order.json ./
 
 ENV PORT=8080
+# Keep memory bounded on a small (e.g. 512MB) host: single numba thread, an
+# on-disk JIT cache (so restarts re-use compiled code), and limited waitress
+# concurrency so simultaneous Monte-Carlo requests can't pile up allocations.
+ENV NUMBA_NUM_THREADS=1
+ENV NUMBA_CACHE_DIR=/tmp/numba-cache
+ENV OMP_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
 EXPOSE 8080
-CMD ["sh", "-c", "waitress-serve --host=0.0.0.0 --port=${PORT} server:app"]
+CMD ["sh", "-c", "waitress-serve --host=0.0.0.0 --port=${PORT} --threads=2 --connection-limit=25 --channel-timeout=120 server:app"]

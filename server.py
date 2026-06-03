@@ -36,9 +36,9 @@ def _engine_authorized():
 
 
 def _clamp_trials(raw):
-    """Clamp trials into [100, 100000] so a caller can't request a billion-trial
-    compute (DoS). Defaults to 20000 when missing/falsy."""
-    return max(100, min(int(raw or 20000), 100000))
+    """Clamp trials into [100, 30000] so a caller can't request a huge compute that
+    spikes memory (the engine runs on a small box). Defaults to 20000 when missing."""
+    return max(100, min(int(raw or 20000), 30000))
 
 # One-time numba JIT warmup, kicked off by the first /health hit. Guarded by a
 # module-level bool so we only ever start the daemon thread once.
