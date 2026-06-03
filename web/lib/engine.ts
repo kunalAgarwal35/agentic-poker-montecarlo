@@ -11,7 +11,7 @@ export async function runPql(query: string, opts: RunPqlOptions = {}): Promise<P
   try {
     resp = await fetch(`${ENGINE_URL}/pql`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-engine-key': process.env.ENGINE_KEY ?? '' },
       body: JSON.stringify({ query, trials: opts.trials ?? 20000, seed: opts.seed ?? null }),
       signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS),
     });
@@ -55,7 +55,7 @@ export async function runGraph(payload: GraphPayload): Promise<GraphResult> {
   try {
     resp = await fetch(`${ENGINE_URL}/pql-graph`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-engine-key': process.env.ENGINE_KEY ?? '' },
       body: JSON.stringify({ trials: 20000, seed: null, ...payload }),
       signal: AbortSignal.timeout(ENGINE_TIMEOUT_MS),
     });

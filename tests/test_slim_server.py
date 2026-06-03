@@ -59,3 +59,60 @@ def test_bad_query_400():
                  "PLAYER_1='AsKs', PLAYER_2='QdQc'",
     })
     assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+_VALID_QUERY = (
+    "select avg(riverEquity(PLAYER_1)) as e from game='holdem', "
+    "PLAYER_1='AsKs', PLAYER_2='QdQc'"
+)
+
+
+def test_pql_requires_engine_key_when_set(monkeypatch):
+    """With ENGINE_KEY set, a /pql POST without the X-Engine-Key header is 401."""
+    monkeypatch.setenv("ENGINE_KEY", "testkey")
+    resp = client.post("/pql", json={"query": _VALID_QUERY, "trials": 200})
+    assert resp.status_code == 401, resp.get_data(as_text=True)
+
+
+def test_pql_accepts_correct_engine_key(monkeypatch):
+    """With ENGINE_KEY set and the matching header, /pql returns 200."""
+    monkeypatch.setenv("ENGINE_KEY", "testkey")
+    resp = client.post(
+        "/pql",
+        json={"query": _VALID_QUERY, "trials": 200, "seed": 1},
+        headers={"X-Engine-Key": "testkey"},
+    )
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+
+def test_health_not_protected(monkeypatch):
+    """/health stays open even when ENGINE_KEY is set."""
+    monkeypatch.setenv("ENGINE_KEY", "testkey")
+    resp = client.get("/health")
+    assert resp.status_code == 200
+
+
+def test_graph_requires_engine_key_when_set(monkeypatch):
+    monkeypatch.setenv("ENGINE_KEY", "testkey")
+    resp = client.post("/pql-graph", json={
+        "game": "holdem",
+        "players": {"PLAYER_1": "KhQh", "PLAYER_2": "QdQc"},
+        "kind": "street",
+    })
+    assert resp.status_code == 401, resp.get_data(as_text=True)
+
+
+def test_pql_clamps_huge_trials(monkeypatch):
+    """A wildly large trials value is clamped (capped at 100k), so the request
+    completes quickly with 200 instead of hanging on a billion-trial compute."""
+    monkeypatch.delenv("ENGINE_KEY", raising=False)
+    resp = client.post("/pql", json={
+        "query": _VALID_QUERY,
+        "trials": 99999999,
+        "seed": 1,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    # Clamp ceiling is 100000; the engine may run enumeration (reporting its own
+    # combo count) but never the requested 99,999,999 trials.
+    assert body["trials"] <= 100000, body

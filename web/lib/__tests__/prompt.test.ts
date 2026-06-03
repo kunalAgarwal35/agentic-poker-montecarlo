@@ -17,4 +17,12 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/distribution/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/30%!5%|percentile|range/i);
   });
+  it('enforces the verdict-first + coaching output contract', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/verdict/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/assum/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/gutshot/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/open-ended|OESD/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/pot odds|break-even/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/rule of 2|rule-of-2/i);
+  });
 });

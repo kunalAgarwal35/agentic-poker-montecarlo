@@ -8,6 +8,7 @@ export type AnalyticsEvent =
   | 'recent_opened'
   | 'choice_selected'
   | 'feedback_given'
+  | 'result_shared'
   | 'agent_error';
 
 export function track(

@@ -24,3 +24,14 @@ CREATE TABLE IF NOT EXISTS feedback (
   meta JSONB                      -- { tool?, vizKind?, url? }
 );
 CREATE INDEX IF NOT EXISTS feedback_ts_idx ON feedback (ts DESC);
+
+-- Rate-limit / cost-abuse ledger. One row per allowed request; counts within a
+-- time window drive checkRateLimit() in web/lib/ratelimit.ts (per-IP/hour cap +
+-- global/day budget kill-switch). Old rows are pruned opportunistically.
+CREATE TABLE IF NOT EXISTS rate_events (
+  id BIGSERIAL PRIMARY KEY,
+  ip TEXT,
+  route TEXT,
+  ts TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS rate_events_ts_idx ON rate_events (ts);

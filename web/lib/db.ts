@@ -57,6 +57,17 @@ export async function ensureSchema(): Promise<void> {
     )
   `;
   await db`CREATE INDEX IF NOT EXISTS feedback_ts_idx ON feedback (ts DESC)`;
+  // Rate-limit / cost-abuse ledger: one row per allowed request. Counts in a
+  // time window drive checkRateLimit() in lib/ratelimit.ts.
+  await db`
+    CREATE TABLE IF NOT EXISTS rate_events (
+      id BIGSERIAL PRIMARY KEY,
+      ip TEXT,
+      route TEXT,
+      ts TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `;
+  await db`CREATE INDEX IF NOT EXISTS rate_events_ts_idx ON rate_events (ts)`;
   schemaReady = true;
 }
 

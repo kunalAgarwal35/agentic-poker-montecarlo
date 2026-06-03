@@ -5,13 +5,78 @@ import { AGENT_SYSTEM_PROMPT } from '@/lib/prompts';
 import { QueryIntent } from '@/lib/intent';
 import { executeBuildQuery } from '@/lib/buildQuery';
 import { runPqlTool } from '@/lib/runPqlTool';
+import { checkRateLimit, clientIp } from '@/lib/ratelimit';
 
 // The Anthropic SDK + streamText() need the Node.js runtime; Edge would break streaming.
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
+// Hard input caps — second line of defence behind the rate limiter. A request
+// that violates these never reaches streamText() and so never bills Opus.
+const MAX_MESSAGES = 20;
+const MAX_TOTAL_CHARS = 8000;
+const MAX_LATEST_USER_CHARS = 2000;
+
+// Sum the text length across all parts of a UIMessage (parts may be text,
+// tool calls, etc.; only text parts carry user-supplied prose).
+function messageTextLength(m: UIMessage): number {
+  const parts = (m as { parts?: unknown }).parts;
+  if (!Array.isArray(parts)) return 0;
+  let total = 0;
+  for (const p of parts) {
+    if (
+      p &&
+      typeof p === 'object' &&
+      (p as { type?: unknown }).type === 'text' &&
+      typeof (p as { text?: unknown }).text === 'string'
+    ) {
+      total += ((p as { text: string }).text).length;
+    }
+  }
+  return total;
+}
+
 export async function POST(req: Request) {
-  const { messages }: { messages: UIMessage[] } = await req.json();
+  let messages: UIMessage[];
+  try {
+    const body = await req.json();
+    messages = body?.messages;
+  } catch {
+    return Response.json({ error: 'Message too long or malformed.' }, { status: 400 });
+  }
+
+  // Validate shape + size BEFORE any model call.
+  if (!Array.isArray(messages) || messages.length === 0 || messages.length > MAX_MESSAGES) {
+    return Response.json({ error: 'Message too long or malformed.' }, { status: 400 });
+  }
+  let totalChars = 0;
+  for (const m of messages) {
+    if (!m || typeof m !== 'object') {
+      return Response.json({ error: 'Message too long or malformed.' }, { status: 400 });
+    }
+    totalChars += messageTextLength(m);
+  }
+  if (totalChars > MAX_TOTAL_CHARS) {
+    return Response.json({ error: 'Message too long or malformed.' }, { status: 400 });
+  }
+  // Latest user message must be reasonably short.
+  let latestUser: UIMessage | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if ((messages[i] as { role?: unknown }).role === 'user') {
+      latestUser = messages[i];
+      break;
+    }
+  }
+  if (latestUser && messageTextLength(latestUser) > MAX_LATEST_USER_CHARS) {
+    return Response.json({ error: 'Message too long or malformed.' }, { status: 400 });
+  }
+
+  // Rate limit / daily budget — BEFORE streamText so a blocked request never bills Opus.
+  const ip = clientIp(req);
+  const rl = await checkRateLimit(ip, 'chat');
+  if (!rl.ok) {
+    return Response.json({ error: rl.message }, { status: rl.status });
+  }
 
   const result = streamText({
     model: AGENT_MODEL,

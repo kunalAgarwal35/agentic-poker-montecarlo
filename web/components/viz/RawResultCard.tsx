@@ -1,6 +1,7 @@
 'use client';
 import type { RawResult } from '@/lib/types';
 import { CardRow } from '@/components/viz/CardRow';
+import { ShareButton } from '@/components/ShareButton';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell } from 'recharts';
 import { PLAYER_COLORS, ACCENTS } from '@/components/viz/theme';
 
@@ -26,6 +27,9 @@ export function RawResultCard({ data }: { data: RawResult }) {
   const usedWhere = /\bwhere\b/i.test(query);
   const scalarCols = result.columns.filter((c) => c in result.values);
   const histCols = result.columns.filter((c) => result.histograms != null && c in result.histograms);
+  const shareSummary = scalarCols.length
+    ? `Poker math — ${scalarCols.map((c) => `${c} ${fmtScalar(result.values[c])}`).join(', ')}`
+    : undefined;
 
   return (
     <div className="rounded-xl border border-zinc-700 bg-zinc-900/60 p-3 text-sm">
@@ -82,6 +86,9 @@ export function RawResultCard({ data }: { data: RawResult }) {
         <summary className="cursor-pointer">query</summary>
         <code className="block whitespace-pre-wrap break-all pt-1 text-zinc-400">{query}</code>
       </details>
+      <div className="-ml-3">
+        <ShareButton summary={shareSummary} />
+      </div>
     </div>
   );
 }

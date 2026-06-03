@@ -24,6 +24,22 @@ from pql.parser.ast import Query
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
+
+def _engine_authorized():
+    """Shared-secret gate. If ENGINE_KEY is set in the env, the request must send
+    a matching X-Engine-Key header. If ENGINE_KEY is unset (local dev), allow.
+    Read per-request so tests can set the env without re-importing the app."""
+    expected = os.environ.get('ENGINE_KEY')
+    if not expected:
+        return True
+    return request.headers.get('X-Engine-Key') == expected
+
+
+def _clamp_trials(raw):
+    """Clamp trials into [100, 100000] so a caller can't request a billion-trial
+    compute (DoS). Defaults to 20000 when missing/falsy."""
+    return max(100, min(int(raw or 20000), 100000))
+
 # One-time numba JIT warmup, kicked off by the first /health hit. Guarded by a
 # module-level bool so we only ever start the daemon thread once.
 _warmup_started = False
@@ -59,12 +75,14 @@ def pql_endpoint():
     Request body: { "query": "...", "trials": 20000, "seed": null }
     Response:     asdict(result) -> { values, columns, trials, mode, seed, ... }
     """
+    if not _engine_authorized():
+        return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(silent=True) or {}
     query = data.get('query')
     if not query:
         return jsonify({"error": "Missing required field: query"}), 400
 
-    trials = int(data.get('trials') or 20000)
+    trials = _clamp_trials(data.get('trials'))
     seed = data.get('seed')
     if seed is not None:
         seed = int(seed)
@@ -109,9 +127,11 @@ def pql_graph_endpoint():
       { game, board?, dead?, hero?, players:{PLAYER_1:'<cards|range>', ...},
         kind:'street'|'distribution'|'vsclass', trials?, seed? }
     Returns { kind, <payload>, trials, mode, seed }."""
+    if not _engine_authorized():
+        return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(silent=True) or {}
     kind = data.get("kind")
-    trials = int(data.get("trials") or 20000)
+    trials = _clamp_trials(data.get("trials"))
     seed = data.get("seed")
     if seed is not None:
         seed = int(seed)

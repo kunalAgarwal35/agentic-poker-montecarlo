@@ -4,10 +4,23 @@ import type { VizSpec } from '@/lib/types';
 import type { ResultContext } from '@/lib/buildQuery';
 import { ResultViz } from '@/components/viz/ResultViz';
 import { CardRow } from '@/components/viz/CardRow';
+import { ShareButton } from '@/components/ShareButton';
 import { isConcreteHand, rangeLabel } from '@/lib/cards';
 
 function modeBadge(viz: VizSpec) {
   return viz.mode === 'enumeration' ? `Exact · ${viz.trials} runouts` : `Monte Carlo · ${viz.trials} trials`;
+}
+
+// A one-line, share-friendly takeaway derived from the viz when easily available.
+function shareSummary(viz: VizSpec): string | undefined {
+  if (viz.kind === 'equity' && Array.isArray(viz.rows)) {
+    const parts = viz.rows.map((r) => `${r.name} ${(r.equity * 100).toFixed(1)}%`);
+    if (parts.length) return `Poker equity — ${parts.join(' vs ')}`;
+  }
+  if (viz.kind === 'frequency' && typeof viz.pct === 'number') {
+    return `Poker math — ${viz.label}: ${(viz.pct * 100).toFixed(1)}%`;
+  }
+  return undefined;
 }
 
 function SetupHeader({ context }: { context: ResultContext }) {
@@ -50,6 +63,7 @@ export function ResultCard({ resolvedQuery, viz, context }: { resolvedQuery: str
       <button onClick={() => setOpen((o) => !o)} className="mt-3 text-xs text-zinc-500 hover:text-zinc-300">
         {open ? 'Hide' : 'Show'} query
       </button>
+      <ShareButton summary={shareSummary(viz)} />
       {open && <pre className="mt-2 overflow-auto rounded bg-black/40 p-2 text-xs text-zinc-300">{resolvedQuery}</pre>}
     </div>
   );

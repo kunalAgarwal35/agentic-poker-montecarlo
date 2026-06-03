@@ -14,9 +14,30 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const TITLE = "agentic-poker-montecarlo — Ask any poker spot. Get the math.";
+const DESCRIPTION =
+  "Plain-English poker equity, powered by Monte-Carlo. Ask any Hold'em or PLO spot — equity, outs, ranges, and graphs. Free.";
+const SITE_URL = "https://agentic-poker-montecarlo.vercel.app";
+
 export const metadata: Metadata = {
-  title: "Poker Equity",
-  description: "Natural-language poker equity calculator",
+  metadataBase: new URL(SITE_URL),
+  title: {
+    default: TITLE,
+    template: "%s — agentic-poker-montecarlo",
+  },
+  description: DESCRIPTION,
+  openGraph: {
+    title: TITLE,
+    description: DESCRIPTION,
+    url: SITE_URL,
+    siteName: "agentic-poker-montecarlo",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: TITLE,
+    description: DESCRIPTION,
+  },
 };
 
 export default function RootLayout({

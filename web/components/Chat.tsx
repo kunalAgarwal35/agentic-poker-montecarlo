@@ -3,6 +3,7 @@ import { useChat } from '@ai-sdk/react';
 import { useRef, useState } from 'react';
 import { ChatMessage } from '@/components/ChatMessage';
 import { ExampleChips } from '@/components/ExampleChips';
+import { Hero } from '@/components/Hero';
 import { RecentGallery } from '@/components/RecentGallery';
 import { track } from '@/lib/analytics';
 
@@ -83,10 +84,11 @@ export function Chat() {
 
   return (
     <div className="mx-auto flex h-screen max-w-2xl flex-col p-4">
-      <h1 className="mb-3 text-lg font-semibold">Poker Equity — ask a question</h1>
+      <h1 className="mb-3 text-sm font-medium text-zinc-500">agentic-poker-montecarlo</h1>
       <div className="flex flex-1 flex-col gap-3 overflow-y-auto pb-4">
         {messages.length === 0 && (
           <>
+            <Hero />
             <ExampleChips onPick={(p) => { lastQuestionRef.current = p; track('question_submitted', { source: 'chip' }); sendMessage({ text: p }); }} />
             <RecentGallery onPick={(p) => { lastQuestionRef.current = p; track('question_submitted', { source: 'recent' }); sendMessage({ text: p }); }} />
           </>
@@ -114,7 +116,7 @@ export function Chat() {
         <input
           value={input}
           onChange={(e) => setInput(e.currentTarget.value)}
-          placeholder="Ask about an Omaha equity…"
+          placeholder="Ask a Hold'em or PLO question…"
           className="flex-1 rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 caret-green-500 focus:border-zinc-500 focus:outline-none"
         />
         <button disabled={status !== 'ready'} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
