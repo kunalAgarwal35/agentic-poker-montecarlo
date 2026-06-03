@@ -4,7 +4,7 @@ An AI agent that answers natural-language poker-equity questions by compiling th
 
 ## Live demo
 
-> Live at: _(coming soon)_
+> **Live:** https://agentic-poker-montecarlo.vercel.app
 
 ## What it is
 
