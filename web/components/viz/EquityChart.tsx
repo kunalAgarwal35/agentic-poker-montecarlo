@@ -1,0 +1,31 @@
+'use client';
+import { BarChart, Bar, XAxis, YAxis, Cell, Tooltip, ResponsiveContainer } from 'recharts';
+import type { EquityRow } from '@/lib/types';
+import { PLAYER_COLORS, ACCENTS } from '@/components/viz/theme';
+import { ChartTooltip } from '@/components/viz/ChartTooltip';
+
+export function EquityChart({ rows }: { rows: EquityRow[] }) {
+  const data = rows.map((r, i) => ({ name: r.name, equity: +(r.equity * 100).toFixed(1), fill: r.isHero ? ACCENTS.hero : PLAYER_COLORS[i % PLAYER_COLORS.length] }));
+  return (
+    <div>
+      <div style={{ width: '100%', height: 40 + rows.length * 34 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart data={data} layout="vertical" margin={{ left: 8, right: 24 }}>
+            <XAxis type="number" domain={[0, 100]} tick={{ fill: ACCENTS.text, fontSize: 10 }} tickFormatter={(v) => `${v}%`} height={18} />
+            <YAxis type="category" dataKey="name" width={28} tick={{ fill: ACCENTS.text, fontSize: 12 }} />
+            <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
+            <Bar dataKey="equity" radius={[0, 4, 4, 0]} isAnimationActive={false}>
+              {data.map((d, i) => <Cell key={i} fill={d.fill} />)}
+            </Bar>
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+      <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-400">
+        {rows.map((r) => (
+          <li key={r.name}><span className={r.isHero ? 'font-semibold text-zinc-100' : ''}>{r.name}</span>{' '}
+            <span className="tabular-nums">{(r.equity * 100).toFixed(1)}%</span></li>
+        ))}
+      </ul>
+    </div>
+  );
+}

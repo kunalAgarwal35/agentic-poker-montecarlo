@@ -1,0 +1,9 @@
+# Slim PQL engine runtime deps (server.py + pql/). Pinned to the versions the
+# engine was developed/validated against so runtime behavior is identical.
+# llvmlite is pulled in transitively by numba but pinned here for reproducibility.
+flask==2.3.3
+numpy==1.26.3
+numba==0.59.0
+llvmlite==0.42.0
+lark==1.3.1
+waitress==3.0.0

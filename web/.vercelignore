@@ -1,0 +1,25 @@
+# Vercel build config for this monorepo.
+#
+# IMPORTANT: In your Vercel project settings, set the Root Directory to `web`.
+# That isolates the build to this subdirectory, so the Python engine, the
+# licensed java_files/ oracle, docs/, tests/, and other parent-repo artifacts
+# are never uploaded or built by Vercel.
+#
+# With Root Directory = web, this file is mostly belt-and-suspenders: the entries
+# below guard against local-only artifacts accidentally entering the build context.
+
+# Local env (never deploy real secrets; Vercel env vars are configured in the dashboard)
+.env
+.env.local
+.env*.local
+
+# Dependencies / build output (Vercel installs + builds fresh)
+node_modules
+.next
+out
+
+# Editor / OS noise
+.vscode
+.idea
+.DS_Store
+Thumbs.db

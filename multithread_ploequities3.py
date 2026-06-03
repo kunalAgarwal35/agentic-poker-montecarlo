@@ -1,0 +1,1738 @@
+# In this file we will have multiple functions to calculate frequencies of hand strengths by the river
+import itertools
+from concurrent.futures import ProcessPoolExecutor
+import random
+import generating_list as scores
+from itertools import combinations, product
+import time
+import pandas as pd
+import traceback
+from functools import lru_cache
+import atexit
+import os
+
+# from line_profiler_pycharm import profile
+
+# ============= GLOBAL PROCESS POOL (PERSISTENT WORKERS) =============
+# This eliminates the ~5 second overhead of creating processes per request
+_GLOBAL_EXECUTOR = None
+_DEFAULT_WORKERS = 4  # Match server core count
+
+def get_global_executor(num_workers=None):
+    """Get or create a persistent ProcessPoolExecutor."""
+    global _GLOBAL_EXECUTOR
+    if _GLOBAL_EXECUTOR is None:
+        workers = num_workers or _DEFAULT_WORKERS
+        print(f"[ProcessPool] Initializing global executor with {workers} workers...")
+        _GLOBAL_EXECUTOR = ProcessPoolExecutor(max_workers=workers)
+        atexit.register(shutdown_executor)
+        print(f"[ProcessPool] Global executor ready (PID: {os.getpid()})")
+    return _GLOBAL_EXECUTOR
+
+def shutdown_executor():
+    """Cleanup function called at exit."""
+    global _GLOBAL_EXECUTOR
+    if _GLOBAL_EXECUTOR is not None:
+        print("[ProcessPool] Shutting down global executor...")
+        _GLOBAL_EXECUTOR.shutdown(wait=True)
+        _GLOBAL_EXECUTOR = None
+
+def _dummy_warmup_task():
+    """Simple task used to warm up process pool workers."""
+    return 1
+
+def warmup_executor():
+    """Pre-warm the executor by running a dummy task on each worker."""
+    executor = get_global_executor()
+    # Submit dummy tasks to ensure all workers are spawned
+    futures = [executor.submit(_dummy_warmup_task) for _ in range(_DEFAULT_WORKERS)]
+    for f in futures:
+        f.result()
+    print("[ProcessPool] Workers warmed up and ready")
+# ====================================================================
+
+# ============= LOH25 CACHES (TOP 25% OPPONENT RANGES) =============
+# These are loaded once at startup and cached for fast filtering
+import re
+
+_LOH25_PLO5 = None
+_LOH25_PLO4 = None
+
+def load_loh25_plo5():
+    """Load and cache the top 25% PLO5 hands from loh25_plo5.txt."""
+    global _LOH25_PLO5
+    if _LOH25_PLO5 is None:
+        try:
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'loh25_plo5.txt')
+            with open(filepath, 'r') as f:
+                content = f.read()
+            # Extract all 10-character hands (5 cards × 2 chars each)
+            _LOH25_PLO5 = list(set(re.findall(r'[AKQJT98765432][shdc][AKQJT98765432][shdc][AKQJT98765432][shdc][AKQJT98765432][shdc][AKQJT98765432][shdc]', content)))
+            print(f"[LOH25] Loaded {len(_LOH25_PLO5):,} PLO5 top 25% hands")
+        except FileNotFoundError:
+            print("[LOH25] Warning: loh25_plo5.txt not found, using empty list")
+            _LOH25_PLO5 = []
+    return _LOH25_PLO5
+
+def load_loh25_plo4():
+    """Load and cache the top 25% PLO4 hands from loh25_plo4.txt."""
+    global _LOH25_PLO4
+    if _LOH25_PLO4 is None:
+        try:
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'loh25_plo4.txt')
+            with open(filepath, 'r') as f:
+                content = f.read()
+            # Extract all 8-character hands (4 cards × 2 chars each)
+            _LOH25_PLO4 = list(set(re.findall(r'[AKQJT98765432][shdc][AKQJT98765432][shdc][AKQJT98765432][shdc][AKQJT98765432][shdc]', content)))
+            print(f"[LOH25] Loaded {len(_LOH25_PLO4):,} PLO4 top 25% hands")
+        except FileNotFoundError:
+            print("[LOH25] Warning: loh25_plo4.txt not found, using empty list")
+            _LOH25_PLO4 = []
+    return _LOH25_PLO4
+
+def filter_opponent_hands(opponent_hands, dead_cards):
+    """
+    Remove hands that share any card with dead_cards.
+    
+    Args:
+        opponent_hands: List of hand strings (e.g., ['AsKsQsJs', 'AhKhQhJh'])
+        dead_cards: List of card strings (e.g., ['As', 'Kd', '2c'])
+    
+    Returns:
+        Filtered list of hands that don't contain any dead cards
+    """
+    dead_set = set(dead_cards)
+    filtered = []
+    for hand in opponent_hands:
+        # Extract cards from hand string (2 chars each)
+        hand_cards = [hand[i:i+2] for i in range(0, len(hand), 2)]
+        # Check if any card in hand is in dead_cards
+        if not any(card in dead_set for card in hand_cards):
+            filtered.append(hand)
+    return filtered
+
+def warmup_loh25():
+    """Pre-load the loh25 caches at startup."""
+    load_loh25_plo5()
+    load_loh25_plo4()
+    print("[LOH25] Caches warmed up and ready")
+# ==================================================================
+
+board_categories_to_hand_strengths = {
+    "Trips Board": ["Quads", "AA,KK", "TT-QQ", "22-99", "Others"],
+    "Paired Board": ["Quads", "Full House", "Trips", "Others"],
+    "Unpaired Board - Monotone": ["Nut Flush", "Flush", "Set", "Others"],
+    "Unpaired Board - Two Tone (Straight)": ["Nut Straight", "Straight", "Set", "Flush Draw", "Wrap", "Others"],
+    "Unpaired Board - Two Tone (Non-Straight)": ["Set", "Top Two", "Nut Flush Draw", "Flush Draw", "Wrap", "Others"],
+    "Unpaired Board - Rainbow (Straight)": ["Nut Straight", "Straight", "Set", "Wrap", "Others"],
+    "Unpaired Board - Rainbow (Non-Straight)": ["Set", "Top Two", "Wrap", "Others"]
+}
+
+
+def is_quads(hand, board):
+    # Ensure that the evaluation correctly handles PLO rules and the specific scenario described
+    combined = hand + board
+    combined_ranks = [card[0] for card in combined]
+    board_ranks = [card[0] for card in board]
+    hand_ranks = [card[0] for card in hand]
+
+    if len(set(combined_ranks)) > len(combined) - 3:
+        return False
+
+    # Look for ranks that appear four times in the combined hand and board
+    for rank in set(combined_ranks):
+        if combined_ranks.count(rank) == 4:
+            # Check for the scenario where the board has three and the hand has the fourth
+            if board_ranks.count(rank) == 3 and hand_ranks.count(rank) == 1:
+                return True
+            if board_ranks.count(rank) == 2 and hand_ranks.count(rank) == 2:
+                return True
+            # Check for the scenario where the board has one and the hand has three,
+            # which should NOT qualify as quads in PLO since you can only use two cards from your hand
+            if board_ranks.count(rank) == 1 and hand_ranks.count(rank) == 3:
+                continue  # This does not qualify as quads in PLO, move to next rank
+    return False
+
+
+def is_full_house(hand, board):
+    # Check if a full house can be formed with two cards from the hand and three from the board.
+    if best_category_of_hand_on_board(hand, board) == 'Full House':
+        return True
+    return False
+
+
+def is_nut_flush_or_flush(hand, board):
+    '''
+    Check if the hand is a nut flush or a flush
+    :param hand:
+    :param board:
+    :return:
+        False, False if the hand is not a flush
+        True, True if the hand is a nut flush
+        False, True if the hand is a flush but not a nut flush
+    '''
+    bc = best_category_of_hand_on_board(hand, board)
+    if not bc in ['Flush', 'Straight Flush', 'Royal Flush']:
+        return False, False
+    else:
+        suits = [card[1] for card in board]
+        ranks = [card[0] for card in board]
+        flush_suit = max(set(suits), key=suits.count)
+        flush_ranks = [rank for rank, suit in zip(ranks, suits) if suit == flush_suit]
+        ranks_order = '23456789TJQKA'
+        flush_cards = [rank + flush_suit for rank in ranks_order]
+
+        # remove the cards that are in the board
+        for card in board:
+            if card in flush_cards:
+                flush_cards.remove(card)
+        # get the last item in the flush_cards list
+        nut_flush_card = flush_cards[-1]
+        if nut_flush_card in hand:
+            return True, True
+        else:
+            return False, True
+
+
+def is_nutflushdraw_or_flushdraw(hand, board):
+    # This function is only suitable for flop evaluations
+    suits = [card[1] for card in board]
+    ranks = [card[0] for card in board]
+    ranks_order = 'A23456789TJQKA'
+
+    # Identify suits that occur precisely twice on the board
+    suit_counts = {suit: suits.count(suit) for suit in set(suits)}
+    flush_draw_suits = [suit for suit, count in suit_counts.items() if count == 2]
+
+    # Check if the hand contributes to at least a flush draw for those suits
+    hand_suits = [card[1] for card in hand]
+    is_flush_draw = False
+    is_nut_flush_draw = False
+    for flush_suit in flush_draw_suits:
+        if hand_suits.count(flush_suit) >= 2:
+            # Identify the highest card of the flush suit outside the board
+            flush_ranks = [rank for rank, suit in zip(ranks, suits) if suit == flush_suit]
+            flush_cards = [rank + flush_suit for rank in ranks_order]
+            for card in board:
+                if card in flush_cards:
+                    flush_cards.remove(card)
+            nut_flush_card = flush_cards[-1]
+            if nut_flush_card in hand:
+                is_nut_flush_draw = True
+                is_flush_draw = True
+            else:
+                is_flush_draw = True
+    return is_nut_flush_draw, is_flush_draw
+
+
+def is_AA_KK(hand, board):
+    ranks = [card[0] for card in hand]
+    rank_counts = get_rank_counts(hand)
+    if 'A' in rank_counts.keys() and rank_counts['A'] >= 2:
+        return True
+    if 'K' in rank_counts.keys() and rank_counts['K'] >= 2:
+        return True
+    return False
+
+
+def is_TT_to_QQ(hand, board):
+    ranks = [card[0] for card in hand]
+    rank_counts = get_rank_counts(hand)
+    if 'T' in rank_counts.keys() and rank_counts['T'] >= 2:
+        return True
+    if 'J' in rank_counts.keys() and rank_counts['J'] >= 2:
+        return True
+    if 'Q' in rank_counts.keys() and rank_counts['Q'] >= 2:
+        return True
+    return False
+
+
+def is_22_to_99(hand, board):
+    ranks = [card[0] for card in hand]
+    rank_counts = get_rank_counts(hand)
+    if '2' in rank_counts.keys() and rank_counts['2'] >= 2:
+        return True
+    if '3' in rank_counts.keys() and rank_counts['3'] >= 2:
+        return True
+    if '4' in rank_counts.keys() and rank_counts['4'] >= 2:
+        return True
+    if '5' in rank_counts.keys() and rank_counts['5'] >= 2:
+        return True
+    if '6' in rank_counts.keys() and rank_counts['6'] >= 2:
+        return True
+    if '7' in rank_counts.keys() and rank_counts['7'] >= 2:
+        return True
+    if '8' in rank_counts.keys() and rank_counts['8'] >= 2:
+        return True
+    if '9' in rank_counts.keys() and rank_counts['9'] >= 2:
+        return True
+    return False
+
+
+def is_nut_straight_or_straight(hand, board):
+    if best_category_of_hand_on_board(hand, board) != 'Straight':
+        return False, False
+    rank_order = 'A23456789TJQKA'  # Duplicate 'A' to account for the wheel straight (A-2-3-4-5)
+    board_ranks = [card[0] for card in board]
+    hand_ranks = [card[0] for card in hand]
+
+    # Loop through the highest possible straights
+    for i in range(10):  # From 'A' high to '5' high
+        potential_straight = rank_order[9 - i:14 - i]  # Grab sequences of 5 ranks in descending order
+        # Count how many cards from the potential straight are present on the board
+        board_ranks_in_straight = [rank for rank in potential_straight if rank in board_ranks]
+        board_match_count = len(board_ranks_in_straight)
+        required_ranks_in_hand = [rank for rank in potential_straight if rank not in board_ranks_in_straight]
+        if board_match_count == 3:
+            if required_ranks_in_hand[0] in hand_ranks and required_ranks_in_hand[1] in hand_ranks:
+                return True, True
+            else:
+                return False, True
+
+
+def is_flush(hand, board):
+    if best_category_of_hand_on_board(hand, board) == 'Flush':
+        return True
+    return False
+
+
+def is_set(hand, board):
+    combined = hand + board
+    rank_counts = get_rank_counts(combined)
+    if 3 in rank_counts.values() and not is_full_house(hand, board):
+        return True
+    return False
+
+
+def is_wrap(hand, board):
+    # Implement checking for a wrap draw
+    hand_ = list()
+    board_ = list()
+    for card in hand:
+        if card[0] + 's' not in hand_:
+            hand_.append(card[0] + 's')
+        elif card[0] + 'h' not in hand_:
+            hand_.append(card[0] + 'h')
+    for card in board:
+        if card[0] + 'c' not in board_:
+            board_.append(card[0] + 'c')
+        elif card[0] + 'd' not in board_:
+            board_.append(card[0] + 'd')
+    ranks = '23456789TJQKA'
+    ranks_not_in_board = [rank for rank in ranks if rank not in [card[0] for card in board]]
+    num_straights = sum([1 for rank in ranks_not_in_board if
+                         best_category_of_hand_on_board(hand_, board_ + [rank + 'c']) == 'Straight'])
+    if num_straights >= 3:
+        return True
+    return False
+
+
+def is_top_two(hand, board):
+    # Extract ranks from the board and hand
+    board_ranks = [card[0] for card in board]
+    hand_ranks = [card[0] for card in hand]
+
+    # Determine the unique ranks on the board and sort them by their poker value
+    unique_board_ranks = sorted(set(board_ranks), key=lambda rank: '23456789TJQKA'.index(rank), reverse=True)
+
+    # Extract the top two ranks from the sorted unique ranks on the board
+    if len(unique_board_ranks) < 2:
+        return False  # Not enough unique ranks for top two
+    top_two_ranks = unique_board_ranks[:2]
+
+    # Check if each of the top two ranks from the board occurs exactly once in the hand
+    return all(hand_ranks.count(rank) == 1 for rank in top_two_ranks)
+
+
+def get_rank_counts(cards):
+    """Returns a count of each rank in a list of cards."""
+    ranks = [card[0] for card in cards]
+    rank_counts = {rank: ranks.count(rank) for rank in set(ranks)}
+    return rank_counts
+
+
+def is_straight_board(rank_indices):
+    """
+    Determines if the board forms a straight
+    Args:
+        rank_indices (list): List of rank indices for the board, with Ace as 13.
+
+    Returns:
+        bool: True if the board forms a straight, False otherwise.
+    """
+    # Straight check without Ace duality
+    if max(rank_indices) - min(rank_indices) <= 4 and len(set(rank_indices)) == 3:
+        return True
+    if 0 in rank_indices:
+        # replace with 13
+        rank_indices = [13 if x == 0 else x for x in rank_indices]
+        if max(rank_indices) - min(rank_indices) <= 4 and len(set(rank_indices)) == 3:
+            return True
+    return False
+
+
+def categorize_board(board):
+    """
+    Categorizes the board into various types for further analysis
+    Args:
+        board (str or list): The board as a string or list of cards.
+    Returns:
+        str: The category of the board.
+    Scope of categorization:
+    [Trips Board, Paired Board, Unpaired Board - Monotone, Unpaired Board - Two Tone (Straight),
+    Unpaired Board - Two Tone (Non-Straight), Unpaired Board - Rainbow (Straight), Unpaired Board - Rainbow (Non-Straight)]
+    """
+    if type(board) == str:
+        board = [board[i:i + 2] for i in range(0, len(board), 2)]
+    ranks = "A23456789TJQK"
+    suits = [card[1] for card in board]
+    rank_indices = sorted([ranks.index(card[0]) for card in board])
+
+    unique_ranks = set(rank_indices)
+    unique_suits = set(suits)
+
+    # Use the dedicated function for straight detection
+    is_straight = is_straight_board(rank_indices)
+
+    # Classify the board based on suits and straight logic
+    if len(unique_ranks) == 1:
+        return "Trips Board"
+    elif len(unique_ranks) == 2:
+        return "Paired Board"
+    elif len(unique_suits) == 1:
+        return "Unpaired Board - Monotone"
+    elif len(unique_suits) == 2:
+        if is_straight:
+            return "Unpaired Board - Two Tone (Straight)"
+        else:
+            return "Unpaired Board - Two Tone (Non-Straight)"
+    elif len(unique_suits) == 3:
+        if is_straight:
+            return "Unpaired Board - Rainbow (Straight)"
+        else:
+            return "Unpaired Board - Rainbow (Non-Straight)"
+
+
+def hand_strength_category(hand, board, board_category):
+    # Example: Sequentially check each hand strength for the given board category
+    if board_category == "Trips Board":
+        if is_quads(hand, board): return "Quads"
+        if is_AA_KK(hand, board): return "AA,KK"
+        if is_TT_to_QQ(hand, board): return "TT-QQ"
+        if is_22_to_99(hand, board): return "22-99"
+        return "Others"
+    if board_category == "Paired Board":
+        if is_quads(hand, board): return "Quads"
+        if is_full_house(hand, board): return "Full House"
+        if is_set(hand, board): return "Trips"
+        return "Others"
+    if board_category == "Unpaired Board - Monotone":
+        nut_flush, flush = is_nut_flush_or_flush(hand, board)
+        if nut_flush: return "Nut Flush"
+        if flush: return "Flush"
+        if is_set(hand, board): return "Set"
+        return "Others"
+    if board_category == "Unpaired Board - Two Tone (Straight)":
+        nut_straight, straight = is_nut_straight_or_straight(hand, board)
+        if nut_straight: return "Nut Straight"
+        if straight: return "Straight"
+        if is_set(hand, board): return "Set"
+        nut_flush_draw, flush_draw = is_nutflushdraw_or_flushdraw(hand, board)
+        if nut_flush_draw: return "Nut Flush Draw"
+        if flush_draw: return "Flush Draw"
+        if is_wrap(hand, board): return "Wrap"
+        return "Others"
+    if board_category == "Unpaired Board - Two Tone (Non-Straight)":
+        if is_set(hand, board): return "Set"
+        if is_top_two(hand, board): return "Top Two"
+        nut_flush_draw, flush_draw = is_nutflushdraw_or_flushdraw(hand, board)
+        if nut_flush_draw: return "Nut Flush Draw"
+        if flush_draw: return "Flush Draw"
+        if is_wrap(hand, board): return "Wrap"
+        return "Others"
+    if board_category == "Unpaired Board - Rainbow (Straight)":
+        nut_straight, straight = is_nut_straight_or_straight(hand, board)
+        if nut_straight: return "Nut Straight"
+        if straight: return "Straight"
+        if is_set(hand, board): return "Set"
+        if is_wrap(hand, board): return "Wrap"
+        return "Others"
+    if board_category == "Unpaired Board - Rainbow (Non-Straight)":
+        if is_set(hand, board): return "Set"
+        if is_top_two(hand, board): return "Top Two"
+        if is_wrap(hand, board): return "Wrap"
+        return "Others"
+    return "Others"
+
+
+def categorize_hands_chunk(hands_chunk, board):
+    """
+    Helper function to categorize a chunk of hands.
+    """
+    board_category = categorize_board(board)
+    hand_categories = [(hand, hand_strength_category(hand, board, board_category)) for hand in hands_chunk]
+    return hand_categories
+
+
+def break_hands_into_categories(hands, board, num_processes=4):
+    # Number of processes to use
+    # Splitting the hands list into chunks for each process
+    chunk_size = len(hands) // num_processes
+    hands_chunks = [hands[i * chunk_size:(i + 1) * chunk_size] for i in range(num_processes)]
+    if len(hands) % num_processes:
+        hands_chunks[-1].extend(hands[num_processes * chunk_size:])
+
+    return_dict = {}
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        # Submitting tasks to the executor
+        futures = [executor.submit(categorize_hands_chunk, chunk, board) for chunk in hands_chunks]
+
+        # Gathering and aggregating results
+        for future in futures:
+            hand_categories_chunk = future.result()
+            for hand, category in hand_categories_chunk:
+                if category not in return_dict:
+                    return_dict[category] = [hand]
+                else:
+                    return_dict[category].append(hand)
+
+    return return_dict
+
+
+@lru_cache(maxsize=100 * 1024 * 1024 // 64)  # Assuming average size of each cache entry is 64 bytes
+def get_score_from_scoredict(input):
+    score_dict = scores.score_dict
+    return score_dict.get(input, 0)
+
+
+def best_score_of_hand_on_board(hand, board, score_dict):
+    board_combos = list(combinations(board, 3))
+    return max(get_score_from_scoredict(''.join(sorted(hand_combo + board_combo)))
+               for hand_combo in combinations(hand, 2)
+               for board_combo in board_combos)
+
+
+def determine_game_type(hand):
+    """Determines the game type based on the number of cards in a hand.
+
+    Args:
+        hand (list): A single hand.
+
+    Returns:
+        tuple: The game type and number of cards per hand.
+    """
+    hand_length = len(hand)
+    if hand_length == 5:
+        return 'plo5', 5
+    elif hand_length == 6:
+        return 'plo6', 6
+    elif hand_length == 4:
+        return 'plo4', 4
+    else:
+        raise ValueError('Invalid number of cards in the hand.')
+
+
+def preprocess_hand(hand_str):
+    """Converts a hand string into a list of cards.
+
+    Args:
+        hand_str (str): The hand in string format.
+
+    Returns:
+        list: The hand as a list of cards.
+    """
+    return [hand_str[i:i + 2] for i in range(0, len(hand_str), 2)]
+
+
+def preprocess_hands(hands_list):
+    """Preprocesses multiple hands from strings to lists of cards.
+
+    Args:
+        hands_list (list): The list of hands in string format.
+
+    Returns:
+        list: A list of hands, each as a list of cards.
+    """
+    return [preprocess_hand(hand) for hand in hands_list]
+
+
+def best_possible_score(board):
+    deck = scores.generate_deck(board)
+    all_possible_hands = list(combinations(deck, 2))
+    best_score = 0
+    for hand in all_possible_hands:
+        hand_score = best_score_of_hand_on_board(hand, board, scores.score_dict)
+        best_score = max(best_score, hand_score)
+    return best_score
+
+
+def best_category_of_hand_on_board(hand, board):
+    best_score = 0
+    best_combo = ''
+    # Generate all possible 2-card combinations from the hand and 3-card combinations from the board
+    for hand_combo in combinations(hand, 2):
+        for board_combo in combinations(board, 3):
+            # Combine hand and board cards to form a 5-card poker hand
+            full_hand = hand_combo + board_combo
+            # Convert to a string representation or any format that matches the score_dict keys
+            hand_str = scores.sort_hand(''.join(full_hand))
+            # Update best score if this combo's score is higher
+            new_score = scores.score_dict.get(hand_str, 0)
+            best_score = max(best_score, new_score)
+    return scores.scores_to_category_map.get(best_score, 0)
+
+
+def test_best_score_function():
+    # let's assume some hands and a board
+    hand = ['As', 'Ks', 'Qs', 'Js', 'Ts', '9s']
+    board = ['2s', '3s', 'Ac', 'Ad', '6c']
+    strength = best_category_of_hand_on_board(hand, board)
+    # assert strength is 'Three of a Kind'
+    assert strength == 'Three of a Kind'
+
+
+def generate_deck(exclude_cards):
+    suits = 'shdc'
+    ranks = '23456789TJQKA'
+    deck = [r + s for r in ranks for s in suits if (r + s) not in exclude_cards]
+    random.shuffle(deck)
+    return deck
+
+
+def plo5equities(hands, number_of_trials, board=[], opponent_hands=[]):
+    '''
+    :param hands: list of lists of strings, each list of strings is a hand
+    :param number_of_trials:
+    :param board:
+    :return:
+    '''
+    # print("Hands: ", hands, " Type: ", type(hands))
+    # print("Number of Trials: ", number_of_trials, " Type: ", type(number_of_trials))
+    # print("Board: ", board, " Type: ", type(board))
+    # print("Opponent Hands: ", len(opponent_hands), " Type: ", type(opponent_hands))
+    try:
+        all_cards_in_play = [card for hand in hands for card in hand]
+        if len(board):
+            all_cards_in_play += board
+        deck = generate_deck(all_cards_in_play)
+        win_frequencies = {''.join(hand): 0 for hand in hands}
+        win_frequencies_pairs = {''.join(a) + '_' + ''.join(b): 0 for a, b in combinations(hands, 2)}
+        for _ in range(number_of_trials):
+            # Pick a random hand from the deck
+            if len(opponent_hands):
+                random_hand = random.sample(opponent_hands, 1)[0]
+                # Convert string hand to list if needed
+                if type(random_hand) == str:
+                    random_hand = preprocess_hand(random_hand)
+                deck = generate_deck(all_cards_in_play + random_hand)
+                random_board = board + random.sample(deck, 5 - len(board))
+            else:
+                random.shuffle(deck)
+                random_hand = deck[:5]
+                random_board = board + deck[6:(11 - len(board))]
+            # Pick a random board from the deck
+
+            random_hand_best_score = best_score_of_hand_on_board(random_hand, random_board, scores.score_dict)
+            # random_hand_category = best_category_of_hand_on_board(random_hand, random_board)
+            # print(random_hand, random_board, random_hand_category)
+            # Calculate best score for each hand on the random board
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, random_board, scores.score_dict) for hand in
+                           hands}
+            # hand_categories = {''.join(hand): best_category_of_hand_on_board(hand, random_board) for hand in hands}
+            # print('Your Hand Categories: ', hand_categories)
+            # check which hands have score higher than the random hand, if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5
+            for hand, score in hand_scores.items():
+                if score > random_hand_best_score:
+                    win_frequencies[hand] += 1
+                elif score == random_hand_best_score:
+                    win_frequencies[hand] += 0.5
+            # check which pair of hands have score higher than the random hand (either one could be higher), if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5, if all three are equal, increment the win frequency by 0.66
+            pairs = combinations(hands, 2)
+            for pair in pairs:
+                key = ''.join(pair[0]) + '_' + ''.join(pair[1])
+                if hand_scores[''.join(pair[0])] > random_hand_best_score or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_score:
+                    win_frequencies_pairs[key] += 1
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.66
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.5
+    except Exception as e:
+        print(f"[ERROR] plo5equities: {traceback.format_exc()}")
+        raise e
+    # divide the win frequency by the number of trials to get the win frequency
+    for hand in win_frequencies.keys():
+        win_frequencies[hand] /= number_of_trials
+    for pair in win_frequencies_pairs.keys():
+        win_frequencies_pairs[pair] /= number_of_trials
+
+    # print(f"Process Win Frequencies: {win_frequencies}")
+    # print(f"Process Win Frequencies Pairs: {win_frequencies_pairs}")
+    return win_frequencies, win_frequencies_pairs
+
+
+def plo5equities_3h(hands, number_of_trials, board=[], opponent_hands=[]):
+    '''
+    :param hands: list of lists of strings, each list of strings is a hand
+    :param number_of_trials:
+    :param board: list
+    :return:
+    '''
+    # print("Hands: ", hands, " Type: ", type(hands))
+    # print("Number of Trials: ", number_of_trials, " Type: ", type(number_of_trials))
+    # print("Board: ", board, " Type: ", type(board))
+    # print("Opponent Hands: ", len(opponent_hands), " Type: ", type(opponent_hands))
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    try:
+        all_cards_in_play = [card for hand in hands for card in hand]
+        if len(board):
+            all_cards_in_play += board
+        deck = generate_deck(all_cards_in_play)
+        win_frequencies = {''.join(hand): 0 for hand in hands}
+        win_frequencies_pairs = {''.join(a) + '_' + ''.join(b): 0 for a, b in combinations(hands, 2)}
+        for _ in range(number_of_trials):
+            # Pick a random hand from the deck
+            if len(opponent_hands):
+                random_hands = random.sample(opponent_hands, 2)
+                random_hand = random_hands[0]
+                random_hand2 = random_hands[1]
+                if type(random_hand) == str:
+                    random_hand = preprocess_hand(random_hand)
+                    random_hand2 = preprocess_hand(random_hands[1])
+                deck = generate_deck(all_cards_in_play + random_hand + random_hand2)
+                random_board = board + random.sample(deck, 5 - len(board))
+            else:
+                random.shuffle(deck)
+                random_hand = deck[:5]
+                random_hand2 = deck[5:10]
+                # Pick a random board from the deck
+                random_board = board + deck[10:(15 - len(board))]
+            random_hand_best_scores = [best_score_of_hand_on_board(h, random_board, scores.score_dict) for h in
+                                       [random_hand, random_hand2]]
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, random_board, scores.score_dict) for hand in
+                           hands}
+            # hand_categories = {''.join(hand): best_category_of_hand_on_board(hand, random_board) for hand in hands}
+            # print('Your Hand Categories: ', hand_categories)
+            # check which hands have score higher than the random hand, if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5
+            for hand, score in hand_scores.items():
+                if score < max(random_hand_best_scores):
+                    pass
+                elif score > max(random_hand_best_scores):
+                    win_frequencies[hand] += 1
+                elif max(random_hand_best_scores) == score and score == min(random_hand_best_scores):
+                    win_frequencies[hand] += 0.33
+
+            # check which pair of hands have score higher than the random hand (either one could be higher), if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5, if all three are equal, increment the win frequency by 0.66
+            pairs = combinations(hands, 2)
+            for pair in pairs:
+                key = ''.join(pair[0]) + '_' + ''.join(pair[1])
+                if hand_scores[''.join(pair[0])] > random_hand_best_scores[0] or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 1/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[0] and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 0.66/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[0] or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 0.5/2
+
+                if hand_scores[''.join(pair[0])] > random_hand_best_scores[1] or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 1/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[1] and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 0.66/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[1] or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 0.5/2
+    except Exception as e:
+        print(traceback.format_exc())
+        print(e)
+        # breakpoint()
+    # divide the win frequency by the number of trials to get the win frequency
+    for hand in win_frequencies.keys():
+        win_frequencies[hand] /= number_of_trials
+    for pair in win_frequencies_pairs.keys():
+        win_frequencies_pairs[pair] /= number_of_trials
+
+    # print(f"Process Win Frequencies: {win_frequencies}")
+    # print(f"Process Win Frequencies Pairs: {win_frequencies_pairs}")
+    return win_frequencies, win_frequencies_pairs
+
+
+def plo4equities(hands, number_of_trials, board=[], opponent_hands=[]):
+    '''
+    PLO4 Monte Carlo equity calculation.
+    
+    :param hands: list of lists of strings, each list of strings is a 4-card hand
+    :param number_of_trials: number of Monte Carlo trials
+    :param board: list of board cards (0-5 cards)
+    :param opponent_hands: optional list of opponent hands to sample from (for range filtering)
+    :return: tuple of (win_frequencies dict, win_frequencies_pairs dict)
+    '''
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    try:
+        all_cards_in_play = [card for hand in hands for card in hand]
+        if len(board):
+            all_cards_in_play += board
+        deck = generate_deck(all_cards_in_play)
+        win_frequencies = {''.join(hand): 0 for hand in hands}
+        win_frequencies_pairs = {''.join(a) + '_' + ''.join(b): 0 for a, b in combinations(hands, 2)}
+        for _ in range(number_of_trials):
+            # Pick a random opponent hand
+            if len(opponent_hands):
+                random_hand = random.sample(opponent_hands, 1)[0]
+                if type(random_hand) == str:
+                    random_hand = preprocess_hand(random_hand)
+                deck = generate_deck(all_cards_in_play + random_hand)
+                random_board = board + random.sample(deck, 5 - len(board))
+            else:
+                random.shuffle(deck)
+                random_hand = deck[:4]  # 4 cards for PLO4
+                random_board = board + deck[4:(9 - len(board))]  # board starts after 4 cards
+            
+            random_hand_best_score = best_score_of_hand_on_board(random_hand, random_board, scores.score_dict)
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, random_board, scores.score_dict) for hand in hands}
+            
+            # Check which hands beat the random opponent
+            for hand, score in hand_scores.items():
+                if score > random_hand_best_score:
+                    win_frequencies[hand] += 1
+                elif score == random_hand_best_score:
+                    win_frequencies[hand] += 0.5
+            
+            # Check pairwise equities
+            pairs = combinations(hands, 2)
+            for pair in pairs:
+                key = ''.join(pair[0]) + '_' + ''.join(pair[1])
+                if hand_scores[''.join(pair[0])] > random_hand_best_score or hand_scores[''.join(pair[1])] > random_hand_best_score:
+                    win_frequencies_pairs[key] += 1
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score and hand_scores[''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.66
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score or hand_scores[''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.5
+    except Exception as e:
+        print(traceback.format_exc())
+        print(e)
+    
+    # Normalize by number of trials
+    for hand in win_frequencies.keys():
+        win_frequencies[hand] /= number_of_trials
+    for pair in win_frequencies_pairs.keys():
+        win_frequencies_pairs[pair] /= number_of_trials
+
+    return win_frequencies, win_frequencies_pairs
+
+
+def plo4equities_25pct(hands, number_of_trials, board=[]):
+    """
+    PLO4 equity calculation against top 25% opponent range.
+    
+    This is a wrapper around plo4equities that automatically loads and filters
+    the top 25% PLO4 hands as the opponent range.
+    
+    :param hands: list of hands (strings or lists of cards)
+    :param number_of_trials: number of Monte Carlo trials
+    :param board: list of board cards
+    :return: tuple of (win_frequencies dict, win_frequencies_pairs dict)
+    """
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    
+    # Get all dead cards (hero hands + board)
+    all_dead = [card for hand in hands for card in hand] + board
+    
+    # Load and filter opponent range
+    loh25 = load_loh25_plo4()
+    opponent_range = filter_opponent_hands(loh25, all_dead)
+    
+    if len(opponent_range) == 0:
+        print("[WARNING] No valid opponent hands after filtering, using full range")
+        return plo4equities(hands, number_of_trials, board, opponent_hands=[])
+    
+    return plo4equities(hands, number_of_trials, board, opponent_hands=opponent_range)
+
+
+def plo5equities_25pct(hands, number_of_trials, board=[]):
+    """
+    PLO5 equity calculation against top 25% opponent range.
+    
+    This is a wrapper around plo5equities that automatically loads and filters
+    the top 25% PLO5 hands as the opponent range.
+    
+    :param hands: list of hands (strings or lists of cards)
+    :param number_of_trials: number of Monte Carlo trials
+    :param board: list of board cards
+    :return: tuple of (win_frequencies dict, win_frequencies_pairs dict)
+    """
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    
+    # Get all dead cards (hero hands + board)
+    all_dead = [card for hand in hands for card in hand] + board
+    
+    # Load and filter opponent range
+    loh25 = load_loh25_plo5()
+    opponent_range = filter_opponent_hands(loh25, all_dead)
+    
+    if len(opponent_range) == 0:
+        print("[WARNING] No valid opponent hands after filtering, using full range")
+        return plo5equities(hands, number_of_trials, board, opponent_hands=[])
+    
+    return plo5equities(hands, number_of_trials, board, opponent_hands=opponent_range)
+
+
+def plo6equities(hands, number_of_trials, board=[], opponent_hands=[]):
+    '''
+    :param hands: list of lists of strings, each list of strings is a hand
+    :param number_of_trials:
+    :param board: list
+    :return:
+    '''
+    # print("Hands: ", hands, " Type: ", type(hands))
+    # print("Number of Trials: ", number_of_trials, " Type: ", type(number_of_trials))
+    # print("Board: ", board, " Type: ", type(board))
+    # print("Opponent Hands: ", len(opponent_hands), " Type: ", type(opponent_hands))
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    gamelength = len(hands[0])
+    try:
+        all_cards_in_play = [card for hand in hands for card in hand]
+        if len(board):
+            all_cards_in_play += board
+        deck = generate_deck(all_cards_in_play)
+        win_frequencies = {''.join(hand): 0 for hand in hands}
+        win_frequencies_pairs = {''.join(a) + '_' + ''.join(b): 0 for a, b in combinations(hands, 2)}
+        for _ in range(number_of_trials):
+            # Pick a random hand from the deck
+            if len(opponent_hands):
+                random_hand = random.sample(opponent_hands, 1)[0]
+                if type(random_hand) == str:
+                    random_hand = preprocess_hand(random_hand)
+                deck = generate_deck(all_cards_in_play + random_hand)
+                random_board = board + random.sample(deck, 5 - len(board))
+            else:
+                random.shuffle(deck)
+                random_hand = deck[:gamelength]
+                # Pick a random board from the deck
+                random_board = board + deck[gamelength:(gamelength+5 - len(board))]
+            random_hand_best_score = best_score_of_hand_on_board(random_hand, random_board, scores.score_dict)
+            # random_hand_category = best_category_of_hand_on_board(random_hand, random_board)
+            # print(random_hand, random_board, random_hand_category)
+            # Calculate best score for each hand on the random board
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, random_board, scores.score_dict) for hand in
+                           hands}
+            # hand_categories = {''.join(hand): best_category_of_hand_on_board(hand, random_board) for hand in hands}
+            # print('Your Hand Categories: ', hand_categories)
+            # check which hands have score higher than the random hand, if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5
+            for hand, score in hand_scores.items():
+                if score > random_hand_best_score:
+                    win_frequencies[hand] += 1
+                elif score == random_hand_best_score:
+                    win_frequencies[hand] += 0.5
+            # check which pair of hands have score higher than the random hand (either one could be higher), if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5, if all three are equal, increment the win frequency by 0.66
+            pairs = combinations(hands, 2)
+            for pair in pairs:
+                key = ''.join(pair[0]) + '_' + ''.join(pair[1])
+                if hand_scores[''.join(pair[0])] > random_hand_best_score or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_score:
+                    win_frequencies_pairs[key] += 1
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.66
+                elif hand_scores[''.join(pair[0])] == random_hand_best_score or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_score:
+                    win_frequencies_pairs[key] += 0.5
+    except Exception as e:
+        print(traceback.format_exc())
+        print(e)
+        # breakpoint()
+    # divide the win frequency by the number of trials to get the win frequency
+    for hand in win_frequencies.keys():
+            win_frequencies[hand] /= number_of_trials
+    for pair in win_frequencies_pairs.keys():
+            win_frequencies_pairs[pair] /= number_of_trials
+    # print(f"Process Win Frequencies: {win_frequencies}")
+    # print(f"Process Win Frequencies Pairs: {win_frequencies_pairs}")
+    return win_frequencies, win_frequencies_pairs
+
+
+def equity_between_known_hands_exhaustive(hands, dead_cards=[], board=[], max_tials=2000):
+    """
+    Calculate equity for known hands using exhaustive board generation
+    
+    Args:
+        hands (list): List of hands to calculate equities for
+        dead_cards (list, optional): Cards to remove from the deck. Defaults to empty list.
+        board (list, optional): Community cards already on the board. Defaults to empty list.
+        remaining_board_size (int, optional): Number of additional board cards to generate. Defaults to 5.
+    
+    Returns:
+        dict: Equity percentages for each hand
+    """
+    try:
+        # Preprocess hands to ensure they are lists of card strings
+        if isinstance(hands[0], str):
+            hands = [preprocess_hand(hand) for hand in hands]
+        
+        
+        # Collect all cards in play
+        all_cards_in_play = (
+            [card for hand in hands for card in hand] + 
+            board + 
+            dead_cards
+        )
+        
+        # Generate deck excluding cards in play
+        deck = generate_deck(all_cards_in_play)
+        # Calculate remaining board size based on the length of the given board
+        remaining_board_size = 5 - len(board)
+        # Generate all possible board combinations
+        all_combos = list(combinations(deck, remaining_board_size))
+        remaining_board_combos = random.sample(all_combos, min(len(all_combos), max_tials))
+        
+        # Initialize win and tie trackers
+        hand_wins = {tuple(hand): 0 for hand in hands}
+        hand_ties = {tuple(hand): 0 for hand in hands}
+        total_combos = len(remaining_board_combos)
+        
+        # Iterate through all possible board combinations
+        for remaining_board in remaining_board_combos:
+            full_board = list(board) + list(remaining_board)
+            
+            # Calculate best scores for all hands
+            hand_scores = {
+                tuple(hand): best_score_of_hand_on_board(hand, full_board, scores.score_dict) 
+                for hand in hands
+            }
+            
+            # Find the maximum score
+            max_score = max(hand_scores.values())
+            
+            # Determine winners and ties
+            winners = [hand for hand, score in hand_scores.items() if score == max_score]
+            
+            # Update win/tie counts
+            for winner in winners:
+                hand_wins[winner] += 1/len(winners)
+            
+        
+        # Calculate equities
+        equities = {}
+        for hand in hands:
+            hand_tuple = tuple(hand)
+            wins = hand_wins[hand_tuple]
+            total_equity = wins *100 / total_combos
+            equities[''.join(hand)] = round(total_equity, 2)
+        
+        return {
+            'equities': equities,
+            'total_combinations': total_combos
+        }
+    
+    except Exception as e:
+        print(f"Error in equity_between_known_hands_exhaustive: {e}")
+        traceback.print_exc()
+        return {}
+
+def plo6equities_3h(hands, number_of_trials, board=[], opponent_hands=[]):
+    '''
+    :param hands: list of lists of strings, each list of strings is a hand
+    :param number_of_trials:
+    :param board: list
+    :return:
+    '''
+    # print("Hands: ", hands, " Type: ", type(hands))
+    # print("Number of Trials: ", number_of_trials, " Type: ", type(number_of_trials))
+    # print("Board: ", board, " Type: ", type(board))
+    # print("Opponent Hands: ", len(opponent_hands), " Type: ", type(opponent_hands))
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    try:
+        all_cards_in_play = [card for hand in hands for card in hand]
+        if len(board):
+            all_cards_in_play += board
+        deck = generate_deck(all_cards_in_play)
+        win_frequencies = {''.join(hand): 0 for hand in hands}
+        win_frequencies_pairs = {''.join(a) + '_' + ''.join(b): 0 for a, b in combinations(hands, 2)}
+        for _ in range(number_of_trials):
+            # Pick a random hand from the deck
+            if len(opponent_hands):
+                random_hands = random.sample(opponent_hands, 2)
+                random_hand = random_hands[0]
+                random_hand2 = random_hands[1]
+                if type(random_hand) == str:
+                    random_hand = preprocess_hand(random_hand)
+                    random_hand2 = preprocess_hand(random_hands[1])
+                deck = generate_deck(all_cards_in_play + random_hand + random_hand2)
+                random_board = board + random.sample(deck, 5 - len(board))
+            else:
+                random.shuffle(deck)
+                random_hand = deck[:6]
+                random_hand2 = deck[6:12]
+                # Pick a random board from the deck
+                random_board = board + deck[12:(17 - len(board))]
+            random_hand_best_scores = [best_score_of_hand_on_board(h, random_board, scores.score_dict) for h in
+                                       [random_hand, random_hand2]]
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, random_board, scores.score_dict) for hand in
+                           hands}
+            # hand_categories = {''.join(hand): best_category_of_hand_on_board(hand, random_board) for hand in hands}
+            # print('Your Hand Categories: ', hand_categories)
+            # check which hands have score higher than the random hand, if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5
+            for hand, score in hand_scores.items():
+                if score < max(random_hand_best_scores):
+                    pass
+                elif score > max(random_hand_best_scores):
+                    win_frequencies[hand] += 1
+                elif max(random_hand_best_scores) == score and score == min(random_hand_best_scores):
+                    win_frequencies[hand] += 0.33
+
+            # check which pair of hands have score higher than the random hand (either one could be higher), if the score is higher, increment the win frequency, if it is equal, increment the win frequency by 0.5, if all three are equal, increment the win frequency by 0.66
+            pairs = combinations(hands, 2)
+            for pair in pairs:
+                key = ''.join(pair[0]) + '_' + ''.join(pair[1])
+                if hand_scores[''.join(pair[0])] > random_hand_best_scores[0] or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 1/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[0] and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 0.66/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[0] or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[0]:
+                    win_frequencies_pairs[key] += 0.5/2
+
+                if hand_scores[''.join(pair[0])] > random_hand_best_scores[1] or hand_scores[
+                    ''.join(pair[1])] > random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 1/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[1] and hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 0.66/2
+                elif hand_scores[''.join(pair[0])] == random_hand_best_scores[1] or hand_scores[
+                    ''.join(pair[1])] == random_hand_best_scores[1]:
+                    win_frequencies_pairs[key] += 0.5/2
+    except Exception as e:
+        print(traceback.format_exc())
+        print(e)
+        # breakpoint()
+    # divide the win frequency by the number of trials to get the win frequency
+    for hand in win_frequencies.keys():
+        win_frequencies[hand] /= number_of_trials
+    for pair in win_frequencies_pairs.keys():
+        win_frequencies_pairs[pair] /= number_of_trials
+
+    # print(f"Process Win Frequencies: {win_frequencies}")
+    # print(f"Process Win Frequencies Pairs: {win_frequencies_pairs}")
+    return win_frequencies, win_frequencies_pairs
+
+
+def ploequities_for_hand_ranks(hand, number_of_trials, board=[]):
+    '''
+    :param hand: list of strings, each string is a card: Ex: Ah
+    :param number_of_trials:
+    :param board: list
+    :return:
+    '''
+    # print("Hands: ", hands, " Type: ", type(hands))
+    # print("Number of Trials: ", number_of_trials, " Type: ", type(number_of_trials))
+    # print("Board: ", board, " Type: ", type(board))
+    # print("Opponent Hands: ", len(opponent_hands), " Type: ", type(opponent_hands))
+    if type(hand) == str:
+        hand = preprocess_hand(hand)
+    all_cards_in_play = [card for card in hand]
+    if len(board):
+        all_cards_in_play += board
+    deck = generate_deck(all_cards_in_play)
+    game_type = determine_game_type(hand)
+    win_frequency = 0
+
+    random_boards = [board + random.sample(deck, 5 - len(board)) for _ in range(number_of_trials)]
+    all_hand_scores = [best_score_of_hand_on_board(hand, random_board, scores.score_dict) for random_board in
+                       random_boards]
+    # check if the first score is the highest score, if yes, add 1 to the win frequency
+    return sum(all_hand_scores) / number_of_trials
+
+
+def Hand_category_frequencies(board, hero_hands, num_sims=10000):
+    t1 = time.time()
+    if isinstance(board, str):
+        board = preprocess_hand(board)
+    example_hand = hero_hands[0]
+    if isinstance(example_hand, str):
+        hero_hands = preprocess_hands(hero_hands)
+    # Deduce game type from the number of cards in hero hands
+    game_type, num_cards_per_hand = determine_game_type(hero_hands[0])
+    # Step 1: Generate deck by removing the board, and generate 10k random hands for opponent
+    deck = generate_deck([card for hand in hero_hands for card in hand] + board)
+    num_opponent_hands = num_sims
+    # generate 10k random hands for the opponent, each hand contains num_cards_per_hand cards
+    opponent_hands_and_boards = [random.sample(deck, num_cards_per_hand + (5 - len(board))) for _ in
+                                 range(num_opponent_hands)]
+    # Step 2: Filter out top x% by score, note the cutoff score
+    category_list = [
+        best_category_of_hand_on_board(hand[:num_cards_per_hand], board + hand[-(5 - len(board)):]) for hand in
+        opponent_hands_and_boards]
+
+    # Get frequency of each hand category, and save it in a dictionary
+    opponent_hist = {category: category_list.count(category) for category in set(category_list)}
+    opponent_percentages = {k: (v / sum(opponent_hist.values())) * 100 for k, v in opponent_hist.items()}
+    df_opponent = pd.DataFrame(list(opponent_percentages.items()), columns=['Category', 'Opponent'])
+    df_opponent.set_index('Category', inplace=True)
+    all_categories = set(df_opponent.index)  # Start with opponent categories
+
+    # Calculate hero hand categories, by getting the category for each hero hand, in for all the possible turns and rivers
+    all_possible_runouts = [board + list(runout) for runout in list(combinations(deck, 5 - len(board)))]
+    for hero_hand in hero_hands:
+        category_list = [best_category_of_hand_on_board(hero_hand, runout) for runout in all_possible_runouts]
+        hist = {category: category_list.count(category) for category in all_categories}  # Use all_categories
+        total = sum(hist.values())
+        all_categories.update(hist.keys())
+        for category in all_categories:
+            if category not in df_opponent.index:
+                df_opponent.loc[category] = [0]
+
+        percentages = {category: (hist.get(category, 0) / total * 100) if total else 0 for category in all_categories}
+        df_opponent[''.join(hero_hand)] = df_opponent.index.map(percentages).fillna(0)
+    df_opponent.index = pd.CategoricalIndex(df_opponent.index, categories=list(reversed(scores.hierarchy)),
+                                            ordered=True)
+    # Add a column 'Atleast One', in this column we will calculate the probability that at least one opponent has a hand of this category
+    num_opponents = 6 - len(hero_hands)
+    df_opponent['Atleast One'] = 1 - (1 - df_opponent['Opponent'] / 100) ** num_opponents
+    df_opponent['Atleast One'] = df_opponent['Atleast One'] * 100
+    # round to two decimal places
+    df_opponent = df_opponent.round(2)
+
+    # Sort the DataFrame by its index
+    df_opponent.sort_index(ascending=True, inplace=True)
+    return df_opponent
+
+
+def aggregate_results(results, number_of_processes):
+    aggregated_win_frequencies = {}
+    aggregated_win_frequencies_pairs = {}
+
+    # print("Starting aggregation of results...")
+
+    # Sum up the frequencies from each result
+    for win_freqs, win_freqs_pairs in results:
+        for hand, freq in win_freqs.items():
+            if hand not in aggregated_win_frequencies:
+                aggregated_win_frequencies[hand] = []
+            aggregated_win_frequencies[hand].append(freq)
+
+        for pair, freq in win_freqs_pairs.items():
+            if pair not in aggregated_win_frequencies_pairs:
+                aggregated_win_frequencies_pairs[pair] = []
+            aggregated_win_frequencies_pairs[pair].append(freq)
+
+    # Calculate the average win rate across all processes
+    for hand, freqs in aggregated_win_frequencies.items():
+        aggregated_win_frequencies[hand] = sum(freqs) / len(freqs)
+        # print(f"Averaged {hand}: {aggregated_win_frequencies[hand]}")
+
+    for pair, freqs in aggregated_win_frequencies_pairs.items():
+        aggregated_win_frequencies_pairs[pair] = sum(freqs) / len(freqs)
+        # print(f"Averaged {pair}: {aggregated_win_frequencies_pairs[pair]}")
+
+    # print("\nFinished calculating averages.")
+    return aggregated_win_frequencies, aggregated_win_frequencies_pairs
+
+
+def run_parallel_plo6equities(hands, total_number_of_trials, number_of_processes, board=[], opponent_hands=[]):
+    """Run PLO6 equity calculation using persistent global process pool."""
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)  # Reuse persistent pool!
+    
+    futures = [executor.submit(plo6equities, hands, trials_per_process, board, opponent_hands) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+def run_parallel_plo6equities_3h(hands, total_number_of_trials, number_of_processes, board=[], opponent_hands=[]):
+    """Run PLO6 3-handed equity calculation using persistent global process pool."""
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo6equities_3h, hands, trials_per_process, board, opponent_hands) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+def run_parallel_plo5equities_3h(hands, total_number_of_trials, number_of_processes, board=[], opponent_hands=[]):
+    """Run PLO5 3-handed equity calculation using persistent global process pool."""
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo5equities_3h, hands, trials_per_process, board, opponent_hands) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+
+def run_parallel_plo5equities(hands, total_number_of_trials, number_of_processes, board=[], opponent_hands=[]):
+    """Run PLO5 equity calculation using persistent global process pool."""
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo5equities, hands, trials_per_process, board, opponent_hands) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+
+def run_parallel_plo4equities(hands, total_number_of_trials, number_of_processes, board=[], opponent_hands=[]):
+    """Run PLO4 equity calculation using persistent global process pool."""
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo4equities, hands, trials_per_process, board, opponent_hands) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+
+def run_parallel_plo4equities_25pct(hands, total_number_of_trials, number_of_processes, board=[]):
+    """
+    Run PLO4 equity calculation against top 25% range using persistent global process pool.
+    
+    This loads the loh25_plo4 list once, filters out dead cards, and passes the filtered
+    range to all worker processes.
+    """
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    
+    # Get all dead cards (hero hands + board)
+    all_dead = [card for hand in hands for card in hand] + board
+    
+    # Load and filter opponent range ONCE before spawning processes
+    loh25 = load_loh25_plo4()
+    opponent_range = filter_opponent_hands(loh25, all_dead)
+    
+    if len(opponent_range) == 0:
+        print("[WARNING] No valid opponent hands after filtering, using full range")
+        opponent_range = []
+    
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo4equities, hands, trials_per_process, board, opponent_range) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+
+def run_parallel_plo5equities_25pct(hands, total_number_of_trials, number_of_processes, board=[]):
+    """
+    Run PLO5 equity calculation against top 25% range using persistent global process pool.
+    
+    This loads the loh25_plo5 list once, filters out dead cards, and passes the filtered
+    range to all worker processes.
+    """
+    if type(hands[0]) == str:
+        hands = [preprocess_hand(hand) for hand in hands]
+    
+    # Get all dead cards (hero hands + board)
+    all_dead = [card for hand in hands for card in hand] + board
+    
+    # Load and filter opponent range ONCE before spawning processes
+    loh25 = load_loh25_plo5()
+    opponent_range = filter_opponent_hands(loh25, all_dead)
+    
+    if len(opponent_range) == 0:
+        print("[WARNING] No valid opponent hands after filtering, using full range")
+        opponent_range = []
+    
+    trials_per_process = total_number_of_trials // number_of_processes
+    executor = get_global_executor(number_of_processes)
+    
+    futures = [executor.submit(plo5equities, hands, trials_per_process, board, opponent_range) 
+               for _ in range(number_of_processes)]
+    results = [future.result() for future in futures]
+
+    return aggregate_results(results, total_number_of_trials)
+
+
+def score_hands(hands, boards):
+    # return a df where index is board and columns are hands and values are best scores of hand on board
+    rows = []
+    processed = {}
+    for board in boards:
+        board_key = ''.join(board)
+        if board_key not in processed:
+            row = {'board': board_key}
+            hand_scores = {''.join(hand): best_score_of_hand_on_board(hand, board, scores.score_dict) for hand in hands}
+            row.update(hand_scores)
+            processed[board_key] = row
+        rows.append(processed[board_key])
+    return pd.DataFrame(rows).set_index('board')
+
+
+def calculate_equity(df1, df2, hero_hand):
+
+    if type(hero_hand) == list:
+        hero_hand = ''.join(hero_hand)
+    # equity = 0.0
+    # for i in range(len(df1)):
+    #     board1 = df1.index[i]
+    #     board2 = df2.index[i]
+    #     # print(f"Board 1: {board1}, Board 2: {board2}")
+    #
+    #     max_score_board1 = df1.iloc[i].max()
+    #     max_score_board2 = df2.iloc[i].max()
+    #     num_max_values_board1 = (df1.iloc[i] == max_score_board1).astype(int).sum()
+    #     num_max_values_board2 = (df2.iloc[i] == max_score_board2).astype(int).sum()
+    #     hero_score_board1 = df1.at[board1, hero_hand].values[0]
+    #     hero_score_board2 = df2.at[board2, hero_hand].values[0]
+    #
+    #     # print(f"Hero score on Board 1: {hero_score_board1}, Hero score on Board 2: {hero_score_board2}")
+    #
+    #     if max_score_board1 <= hero_score_board1:
+    #         equity += 0.5 / num_max_values_board1
+    #     if max_score_board2 <= hero_score_board2:
+    #         equity += 0.5 / num_max_values_board2
+
+    # return equity / len(df1)
+
+    max_scores_board1 = df1.max(axis=1).to_numpy()
+    max_scores_board2 = df2.max(axis=1).to_numpy()
+    num_max_values_board1 = (df1.to_numpy() == max_scores_board1[:, None]).sum(axis=1)
+    num_max_values_board2 = (df2.to_numpy() == max_scores_board2[:, None]).sum(axis=1)
+    hero_scores_board1 = df1[hero_hand].to_numpy()
+    hero_scores_board2 = df2[hero_hand].to_numpy()
+
+    # create a list of opponents
+    opponents = [col for col in df1.columns if col != hero_hand]
+
+
+    equity_board1 = (max_scores_board1 == hero_scores_board1) * (1 / num_max_values_board1)
+    equity_board2 = (max_scores_board2 == hero_scores_board2) * (1 / num_max_values_board2)
+
+    equity = {'board1': equity_board1.sum() / len(df1), 'board2': equity_board2.sum() / len(df2)}
+    equity_opponents = []
+
+    # for opponent in opponents:
+    #     opeq = {'cards': opponent}
+    #     opponent_scores_board1 = df1[opponent].to_numpy()
+    #     opponent_scores_board2 = df2[opponent].to_numpy()
+    #     opponent_equity_board1 = (max_scores_board1 == opponent_scores_board1) * (1 / num_max_values_board1)
+    #     opponent_equity_board2 = (max_scores_board2 == opponent_scores_board2) * (1 / num_max_values_board2)
+    #     opeq['equity'] = {'board1': opponent_equity_board1.sum() / len(df1), 'board2': opponent_equity_board2.sum() / len(df2)}
+    #     equity_opponents.append(opeq)
+    # equity['opponents'] = equity_opponents
+
+
+
+    # print(f"Equity: {equity}")
+    return equity
+
+def calculate_scenarios(street, board1, board2, hero, dead_cards, num_scenarios, num_opponents):
+    if isinstance(board1, str):
+        board1 = preprocess_hand(board1)
+    if isinstance(board2, str):
+        board2 = preprocess_hand(board2)
+    hero = [preprocess_hand(hand) if isinstance(hand, str) else hand for hand in hero]
+
+    assert not any(card in board1 for card in board2), "Board 1 and Board 2 have common cards"
+    for hand in hero:
+        assert not any(card in hand for card in board1), "Hero hand and Board 1 have common cards"
+        assert not any(card in hand for card in board2), "Hero hand and Board 2 have common cards"
+        assert not any(card in dead_cards for card in hand), "Dead cards and Hero hand have common cards"
+    assert not any(card in dead_cards for card in board1), "Dead cards and Board 1 have common cards"
+    assert not any(card in dead_cards for card in board2), "Dead cards and Board 2 have common cards"
+
+    if street == 'flop':
+        assert len(board1) == 3, "Board 1 should have 3 cards for flop"
+        assert len(board2) == 3, "Board 2 should have 3 cards for flop"
+    elif street == 'turn':
+        assert len(board1) == 4, "Board 1 should have 4 cards for turn"
+        assert len(board2) == 4, "Board 2 should have 4 cards for turn"
+    else:
+        return "Invalid street"
+
+    all_cards_in_play = board1 + board2 + [card for hand in hero for card in hand] + dead_cards
+    equities = {}
+    deck = generate_deck(all_cards_in_play)
+    for _ in range(num_scenarios):
+        random.shuffle(deck)
+        opponent_hands = [deck[i:i + len(hero[0])] for i in range(0, len(hero[0]) * num_opponents, len(hero[0]))]
+        remaining_deck = generate_deck(all_cards_in_play + [card for hand in opponent_hands for card in hand])
+        board1_combos = []
+        board2_combos = []
+        # if street == 'flop':
+        #     b1combinations = list(combinations(remaining_deck, 2))
+        #     for combo in b1combinations:
+        #         board1_combos.append(board1 + list(combo))
+        #         board2_combos.append(board2 + list(combo))
+        # elif street == 'turn':
+        #     b1combinations = list(combinations(remaining_deck, 1))
+        #     for combo in b1combinations:
+        #         board1_combos.append(board1 + list(combo))
+        #         board2_combos.append(board2 + list(combo))
+        if street == 'flop':
+            b1combinations = list(combinations(remaining_deck, 4))
+            for combo in b1combinations:
+                board1_combos.append(board1 + list(combo)[:2])
+                board2_combos.append(board2 + list(combo)[2:])
+        elif street == 'turn':
+            b1combinations = list(combinations(remaining_deck, 2))
+            for combo in b1combinations:
+                board1_combos.append(board1 + list(combo)[:1])
+                board2_combos.append(board2 + list(combo)[1:])
+
+        # if len(board1_combos) > num_scenarios * 2:
+        #     random_combos = random.sample(range(len(board1_combos)), num_scenarios * 2)
+        #     board1_combos = [board1_combos[i] for i in random_combos]
+        #     board2_combos = [board2_combos[i] for i in random_combos]
+
+        df1 = score_hands(hero + opponent_hands, board1_combos)
+        df2 = score_hands(hero + opponent_hands, board2_combos)
+        for hand in hero:
+            filtered_df1 = df1[[''.join(hand)] + [''.join(op) for op in opponent_hands]]
+            filtered_df2 = df2[[''.join(hand)] + [''.join(op) for op in opponent_hands]]
+            key = ''.join(hand)
+            if key not in equities.keys():
+                equities[key] = {'board1': [], 'board2': []}
+            equity = calculate_equity(filtered_df1, filtered_df2, key)
+            equities[key]['board1'].append(equity['board1'])
+            equities[key]['board2'].append(equity['board2'])
+
+    return equities
+
+
+def calculate_scenarios_inexhaustive(street, board1, board2, hero, dead_cards, num_scenarios, num_opponents):
+    if isinstance(board1, str):
+        board1 = preprocess_hand(board1)
+    if isinstance(board2, str):
+        board2 = preprocess_hand(board2)
+    hero = [preprocess_hand(hand) if isinstance(hand, str) else hand for hand in hero]
+
+    assert not any(card in board1 for card in board2), "Board 1 and Board 2 have common cards"
+    for hand in hero:
+        assert not any(card in hand for card in board1), "Hero hand and Board 1 have common cards"
+        assert not any(card in hand for card in board2), "Hero hand and Board 2 have common cards"
+        assert not any(card in dead_cards for card in hand), "Dead cards and Hero hand have common cards"
+    assert not any(card in dead_cards for card in board1), "Dead cards and Board 1 have common cards"
+    assert not any(card in dead_cards for card in board2), "Dead cards and Board 2 have common cards"
+
+    if street == 'flop':
+        assert len(board1) == 3, "Board 1 should have 3 cards for flop"
+        assert len(board2) == 3, "Board 2 should have 3 cards for flop"
+    elif street == 'turn':
+        assert len(board1) == 4, "Board 1 should have 4 cards for turn"
+        assert len(board2) == 4, "Board 2 should have 4 cards for turn"
+    else:
+        return "Invalid street"
+
+    all_cards_in_play = board1 + board2 + [card for hand in hero for card in hand] + dead_cards
+    equities = {}
+    deck = generate_deck(all_cards_in_play)
+    for _ in range(num_scenarios):
+        random.shuffle(deck)
+        opponent_hands = [deck[i:i + len(hero[0])] for i in range(0, len(hero[0]) * num_opponents, len(hero[0]))]
+        remaining_deck = generate_deck(all_cards_in_play + [card for hand in opponent_hands for card in hand])
+        board1_combos = []
+        board2_combos = []
+        # if street == 'flop':
+        #     b1combinations = list(combinations(remaining_deck, 2))
+        #     for combo in b1combinations:
+        #         board1_combos.append(board1 + list(combo))
+        #         board2_combos.append(board2 + list(combo))
+        # elif street == 'turn':
+        #     b1combinations = list(combinations(remaining_deck, 1))
+        #     for combo in b1combinations:
+        #         board1_combos.append(board1 + list(combo))
+        #         board2_combos.append(board2 + list(combo))
+        if street == 'flop':
+            b1combinations = list(combinations(remaining_deck, 4))
+            for combo in b1combinations:
+                board1_combos.append(board1 + list(combo)[:2])
+                board2_combos.append(board2 + list(combo)[2:])
+        elif street == 'turn':
+            b1combinations = list(combinations(remaining_deck, 2))
+            for combo in b1combinations:
+                board1_combos.append(board1 + list(combo)[:1])
+                board2_combos.append(board2 + list(combo)[1:])
+
+        # if len(board1_combos) > num_scenarios * 2:
+        #     random_combos = random.sample(range(len(board1_combos)), num_scenarios * 2)
+        #     board1_combos = [board1_combos[i] for i in random_combos]
+        #     board2_combos = [board2_combos[i] for i in random_combos]
+
+        df1 = score_hands(hero + opponent_hands, board1_combos)
+        df2 = score_hands(hero + opponent_hands, board2_combos)
+        for hand in hero:
+            filtered_df1 = df1[[''.join(hand)] + [''.join(op) for op in opponent_hands]]
+            filtered_df2 = df2[[''.join(hand)] + [''.join(op) for op in opponent_hands]]
+            key = ''.join(hand)
+            if key not in equities.keys():
+                equities[key] = {'board1': [], 'board2': []}
+            equity = calculate_equity(filtered_df1, filtered_df2, key)
+            equities[key]['board1'].append(equity['board1'])
+            equities[key]['board2'].append(equity['board2'])
+
+    return equities
+
+
+def calculate_scenarios_multithreaded(street, board1, board2, hero, dead_cards, num_scenarios, num_opponents, num_workers=8):
+    scenarios_per_worker = num_scenarios // num_workers
+    futures = []
+
+    with ProcessPoolExecutor(max_workers=num_workers) as executor:
+        for _ in range(num_workers):
+            futures.append(executor.submit(calculate_scenarios, street, board1, board2, hero, dead_cards, scenarios_per_worker, num_opponents))
+
+    equities = {key: {'board1':[],'board2':[]} for key in hero}
+    for future in futures:
+        result = future.result()
+        for key in result:
+            equities[key]['board1'].extend(result[key]['board1'])
+            equities[key]['board2'].extend(result[key]['board2'])
+
+    return equities
+
+def generate_random_hand(deck, num_cards):
+    return random.sample(deck, num_cards)
+
+def generate_random_scenario(num_hero_hands=3, num_cards_per_hand=6):
+    deck = generate_deck([])  # Generate a full deck of cards
+    random.shuffle(deck)
+    hero_hands = [deck[i * num_cards_per_hand:(i + 1) * num_cards_per_hand] for i in range(num_hero_hands)]
+    dead_cards = []
+    remaining_deck = generate_deck([card for hand in hero_hands for card in hand] + dead_cards)
+    flop1 = generate_random_hand(remaining_deck, 3)
+    remaining_deck = generate_deck([card for hand in hero_hands for card in hand] + dead_cards + flop1)
+    flop2 = generate_random_hand(remaining_deck, 3)
+
+    return hero_hands, flop1, flop2
+
+def test_random_scenario():
+    # from display_scenario import create_scenario_image
+    import numpy as np
+
+    hero_hands, board1, board2 = generate_random_scenario()
+    dead_cards = []
+
+    print(f"Hero Hands: {hero_hands}")
+    print(f"Flop 1: {board1}")
+    print(f"Flop 2: {board2}")
+    # for i in range(5):
+    t1 = time.time()
+    # equities = calculate_scenarios_multithreaded('flop', board1, board2, [''.join(hand) for hand in hero_hands], dead_cards=dead_cards,
+    #                                              num_scenarios=150, num_opponents=2, num_workers=16)
+    equities = calculate_scenarios('flop', board1, board2, [''.join(hand) for hand in hero_hands],
+                                   dead_cards=dead_cards,
+                                   num_scenarios=150, num_opponents=2)
+
+    hero_data = []
+    for hero in hero_hands:
+        hero_str = ''.join(hero)
+        average_equity = {
+            't': int(np.mean(equities[hero_str]['board1']) * 100),
+            'b': int(np.mean(equities[hero_str]['board2']) * 100)
+        }
+        equity_text = f"T: {average_equity['t']}, B: {average_equity['b']}"
+        hero_data.append({'cards': hero, 'equity': equity_text})
+
+    print(f"Time taken: {time.time() - t1}")
+    print(hero_data)
+
+    from display_scenario import create_scenario_image
+    '''
+    Sample Usage:
+        board1 = ['As', 'Ks', 'Qs']
+    board2 = ['Ad', 'Kd', 'Qd']
+    herocards = [{'cards': ['Ac', 'Kc', 'Qc', 'Jc'], 'equity': "0.5, 0.8"}]
+    opponentcardslist = [{'cards': ['2s', '3s', '4s', '5s'], 'equity': "0.25"}, {'cards': ['2d', '3d', '4d', '5d'], 'equity': "0.25"}]
+    create_scenario_image(board1, board2, herocards, opponentcardslist, display=True)
+    '''
+    create_scenario_image(board1, board2, hero_data, [], display=True)
+    return equities
+
+'''
+TODO: Comment out line profiler import
+remove @profile tags
+
+'''
+
+if __name__ == '__main__':
+
+
+
+    # Ensure all cards are unique
+    deck = generate_deck([])
+    random.shuffle(deck)
+
+    hands = [deck[i*6:(i+1)*6] for i in range(3)]  # Generate 2 hands, each with 4 cards
+    num_hands = len(hands)
+    num_cards_per_hand = len(hands[0])
+    total_cards_used = num_hands * num_cards_per_hand
+    dead_cards = deck[total_cards_used:total_cards_used + 2]  # Next 2 cards as dead cards
+    board = deck[total_cards_used + 2:total_cards_used + 5]  # Next 3 cards as the partial board
+
+
+    result = equity_between_known_hands_exhaustive(
+        hands, 
+        dead_cards=dead_cards, 
+        board=board  # We want to complete the board to 5 cards
+    )
+    print(f"Dead Cards: {''.join(dead_cards)}")
+    print(f"Board: {''.join(board)}")
+    for i, hand in enumerate(hands):
+        print(f"Hand {i+1}: {''.join(hand)}")
+
+    print(result['equities'])
+    print(f"Total board combinations: {result['total_combinations']}")
+    pass
+    # deck = generate_deck([])
+    # n = 4
+    # num_cards_per_hand = 5
+    # hands = [deck[i * num_cards_per_hand:(i + 1) * num_cards_per_hand] for i in range(n)]
+    # # get last 3 cards from the deck as board
+    # # board = deck[-3:]
+    # board = []
+    # print([''.join(hand) for hand in hands])
+    # print(board)
+    # total_number_of_trials = 5000
+    # number_of_processes = 10  # Adjust based on the number of available CPU cores
+    # remaining_deck = generate_deck([card for hand in hands for card in hand] + board)
+    # opponent_hands = [random.sample(remaining_deck, num_cards_per_hand) for _ in range(total_number_of_trials)]
+    # data = {
+    #     "board": board,
+    #     "hero_hands": hands,
+    #     "sprlist": [0.5, 1, 2, 3, 4],
+    #     "xlist": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1],
+    #     "total_number_of_trials": total_number_of_trials,
+    #     "number_of_processes": number_of_processes
+    # }
+    # board = data.get('board')
+    # hero_hands = data.get('hero_hands')
+    # sprlist = data.get('sprlist')
+    # xlist = data.get('xlist')
+    # total_number_of_trials = data.get('total_number_of_trials')
+    # number_of_processes = data.get('number_of_processes')
+    # t1 = time.time()
+    # # for i in range(10):
+    # #     hero_equities_against_calling_range, foldequity = run_parallel_Equity_vs_best_x_hands_and_fold_equity(board, 0.65, hands, 10000, 12)
+    # #     print(hero_equities_against_calling_range)
+    # #     print(foldequity)
+    # # df = Hand_category_frequencies(board,hero_hands=hands,num_sims=5000)
+    # hu_equities = run_parallel_plo5equities(hands, total_number_of_trials, number_of_processes, board,
+    #                                               opponent_hands)
+    # print(hu_equities)
+    # print('Time taken: ', time.time() - t1)
+    # t1 = time.time()
+    # threeway_equities = run_parallel_plo5equities_3h(hands, total_number_of_trials, number_of_processes, board,
+    #                                               opponent_hands)
+    # print(threeway_equities)
+    #
+    # print('Time taken: ', time.time() - t1)
+    # # print(df)

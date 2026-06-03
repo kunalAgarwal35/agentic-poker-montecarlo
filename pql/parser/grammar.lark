@@ -1,0 +1,40 @@
+start: "select"i select_list from_clause where_clause?
+
+select_list: select_item ("," select_item)*
+select_item: agg_call ("as"i NAME)?
+agg_call: NAME "(" expr ")"
+
+where_clause: "where"i expr
+
+?expr: or_expr
+?or_expr:  and_expr ("or"i and_expr)*
+?and_expr: not_expr ("and"i not_expr)*
+?not_expr: "not"i not_expr   -> not_op
+         | cmp
+?cmp: add (CMP_OP add)?      -> compare
+?add: mul (ADD_OP mul)*      -> arith
+?mul: atom (MUL_OP atom)*    -> arith
+?atom: call
+     | INT                   -> exprint
+     | NAME                  -> ident
+     | "(" expr ")"
+
+call: NAME "(" call_args ")"
+call_args: call_arg ("," call_arg)*
+call_arg: call    -> nested_call
+        | NAME     -> ident
+        | INT      -> intlit
+
+from_clause: "from"i param ("," param)*
+param: NAME "=" STRING
+
+CMP_OP: ">=" | "<=" | "!=" | ">" | "<" | "="
+ADD_OP: "+" | "-"
+MUL_OP: "*" | "/"
+NAME: /[A-Za-z_][A-Za-z0-9_]*/
+INT: /[0-9]+/
+STRING: /'[^']*'/
+
+%import common.WS
+%ignore WS
+%ignore /\/\*(\*(?!\/)|[^*])*\*\//

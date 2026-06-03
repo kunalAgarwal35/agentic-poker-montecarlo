@@ -1,0 +1,18 @@
+# Keep the image slim: exclude everything not needed by the PQL engine.
+web/
+java_files/
+config.ini
+legacy/
+node_modules/
+__pycache__/
+.git/
+*.pclprof
+tests/
+.env*
+docs/
+.superpowers/
+.playwright-mcp/
+demo-*.png
+
+# Legacy evaluator data backends — not on the engine path
+*.pkl

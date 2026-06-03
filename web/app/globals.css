@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+/* The app uses a fixed dark theme; the body's Tailwind classes (bg-zinc-950
+   text-zinc-100 in layout.tsx) own the background/foreground. We only set the
+   font here so we don't override those with a hard-coded background/color. */
+body {
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
