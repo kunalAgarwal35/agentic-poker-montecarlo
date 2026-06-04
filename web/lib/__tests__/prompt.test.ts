@@ -25,4 +25,10 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/pot odds|break-even/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/rule of 2|rule-of-2/i);
   });
+  it('enforces commentary accuracy (no invented board specifics)', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/commentary accuracy/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/invent/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/verifiabl/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/flush draw/i);
+  });
 });
