@@ -31,4 +31,9 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/verifiabl/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/flush draw/i);
   });
+  it('enforces the hard rule: no out-counts or named draws unless engine-verified this turn', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/HARD RULE/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/engine tool result|ran .* this turn|did not run an engine/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/backdoor/i);
+  });
 });
