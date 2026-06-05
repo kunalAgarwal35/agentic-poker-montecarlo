@@ -17,7 +17,21 @@ describe('stripPreamble', () => {
     expect(stripPreamble(t)).toBe(t);
   });
 
-  it('never blanks a short reply that has no substantial follow-up', () => {
-    expect(stripPreamble('Let me check.')).toBe('Let me check.');
+  it('blanks a standalone preamble that is the entire text', () => {
+    // The model emits the intent sentence as its OWN text part before the tool
+    // call — the whole string is just the preamble, so it should reduce to ''.
+    expect(stripPreamble("I'll compute your equity and check your draws on this flop.")).toBe('');
+    expect(stripPreamble('Let me check this spot.')).toBe('');
+    expect(stripPreamble('Let me check.')).toBe('');
+    // Tolerates surrounding whitespace and curly apostrophes.
+    expect(stripPreamble('  I’ll run the numbers here.  ')).toBe('');
+    expect(stripPreamble('Sure, let me take a look.')).toBe('');
+  });
+
+  it('strips a glued intent sentence but keeps the real multi-sentence answer', () => {
+    // Two sentences: the first is intent, the second is the verdict. Only the
+    // leading intent sentence is stripped; the verdict survives.
+    const t = "I'll run the numbers. AKo is ~73% vs AQo, the classic domination.";
+    expect(stripPreamble(t)).toMatch(/^AKo is ~73%/);
   });
 });

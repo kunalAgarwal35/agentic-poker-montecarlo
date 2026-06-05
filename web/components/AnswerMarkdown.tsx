@@ -23,6 +23,15 @@ const COMPONENTS = {
 // single leading intent-sentence deterministically — but only when substantial
 // answer text follows, so a short reply is never blanked.
 export function stripPreamble(text: string): string {
+  // Case A: the WHOLE text is just a standalone intent sentence (the model
+  // emitted the preamble as its own text part, before the tool call) — e.g.
+  // "I'll compute your equity and check your draws on this flop." or
+  // "Let me check this spot." Blank it entirely so it renders nothing.
+  const t = text.trim();
+  if (/^(?:I['’]?ll|I will|Let me|Let['’]?s|First,?\s+I['’]?ll|Sure|Okay|Alright|Got it)\b[^.!?\n]*[.!?]?$/i.test(t)) return '';
+  // Case B: a leading intent sentence glued to a real answer in the same
+  // string — strip just the sentence, but only when substantial answer text
+  // follows, so a short reply is never blanked.
   const m = /^\s*(?:I['’]?ll|I will|Let me|Let['’]?s|First,?\s+I['’]?ll|Sure[,!.]?|Okay[,!.]?|Alright[,!.]?|Got it[,!.]?)\b[^.!?\n]*[.!?]\s+/i.exec(text);
   if (m && text.length - m[0].length > 40) return text.slice(m[0].length);
   return text;

@@ -2,7 +2,7 @@
 import { useEffect } from 'react';
 import type { UIMessage } from 'ai';
 import { ResultCard } from '@/components/ResultCard';
-import { AnswerMarkdown } from '@/components/AnswerMarkdown';
+import { AnswerMarkdown, stripPreamble } from '@/components/AnswerMarkdown';
 import { ChoiceCard } from '@/components/ChoiceCard';
 import { RawResultCard } from '@/components/viz/RawResultCard';
 import { MessageFeedback } from '@/components/MessageFeedback';
@@ -82,9 +82,14 @@ export function ChatMessage({
             // User text stays plain; assistant text is rendered as markdown so
             // the bolded headline (and lists/code) display as formatted, not as
             // literal asterisks.
-            return isUser
-              ? <span key={i} className="whitespace-pre-wrap break-words">{part.text}</span>
-              : <AnswerMarkdown key={i} text={part.text} />;
+            if (isUser) {
+              return <span key={i} className="whitespace-pre-wrap break-words">{part.text}</span>;
+            }
+            // A standalone preamble part (e.g. the model emits "I'll compute…"
+            // as its OWN text part before the tool call) reduces to '' after
+            // stripPreamble — skip it so it renders nothing, not an empty box.
+            if (stripPreamble(part.text).trim() === '') return null;
+            return <AnswerMarkdown key={i} text={part.text} />;
           }
           if (part.type === 'tool-build_query' && (part as any).state === 'output-available') {
             const out = (part as any).output as BuildQueryResult;

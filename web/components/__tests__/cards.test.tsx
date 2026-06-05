@@ -36,9 +36,25 @@ describe('card components', () => {
       container.querySelectorAll<HTMLElement>('[style*="rotate"]'),
     );
     expect(transformed.length).toBe(2);
-    // two-card hand: left card tilts one way, right card the other
+    // two-card hand: left card tilts one way, right card the other,
+    // radiating from a single shared pivot below the cards
     expect(transformed[0].style.transform).toContain('rotate(-');
-    expect(transformed[1].style.transform).toContain('rotate(');
+    expect(transformed[1].style.transform).toMatch(/rotate\(\d/);
+  });
+
+  it('CardRow fan renders one rotated card per card for a 5-card PLO hand', () => {
+    const { container } = render(<CardRow cards="AsKhQcJdTs" fan />);
+    const transformed = Array.from(
+      container.querySelectorAll<HTMLElement>('[style*="rotate"]'),
+    );
+    expect(transformed.length).toBe(5);
+    // outer cards tilt in opposite directions around the shared pivot
+    expect(transformed[0].style.transform).toContain('rotate(-');
+    expect(transformed[transformed.length - 1].style.transform).toMatch(/rotate\(\d/);
+    // every card shares the same low pivot (transform-origin below the cards)
+    transformed.forEach((el) => {
+      expect(el.style.transformOrigin).toContain('220%');
+    });
   });
 
   it('CardRow renders nothing for an empty string', () => {

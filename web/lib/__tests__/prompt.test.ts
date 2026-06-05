@@ -57,6 +57,10 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/flushOuts/);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/straightOuts/);
   });
+  it('bans inventing clean/unclean out-quality caveats and self-contradiction', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/clean.*unclean|do not subdivide|tainted/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/internally consistent|contradict/i);
+  });
   it('forbids a redundant separate draw/outs query alongside an equity build_query', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/single query|do not also run a separate/i);
   });
