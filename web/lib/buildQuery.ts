@@ -2,6 +2,38 @@ import { QueryIntent, compileIntentToPQL } from '@/lib/intent';
 import { pickViz } from '@/lib/viz';
 import { runPql as defaultRunPql, runGraph as defaultRunGraph, type GraphResult, type GraphPayload, type RunPqlOptions } from '@/lib/engine';
 import type { PQLResult, VizSpec, HeroDraws } from '@/lib/types';
+import { parseCards } from '@/lib/cards';
+
+// Rank order, low to high (A highest). Index gives comparable strength.
+const RANK_ORDER = '23456789TJQKA';
+
+// Pure card logic (no engine call): does the hero hold the NUT flush draw?
+// The flush-draw suit S is the suit where (hero S) + (board S) >= 4 and the hero
+// holds >= 2 of S (Hold'em uses 2 hole cards; PLO plays exactly 2). Among S's 13
+// ranks, ranks already ON THE BOARD play for everyone, so the "nut flush card" is
+// the highest S rank NOT on the board. The hero has the nut flush draw iff the
+// hero HOLDS that card. Best-effort: any parse oddity returns false.
+function nutFlushDrawStatus(heroCards: string, board: string): boolean {
+  const hero = parseCards(heroCards);
+  const boardCards = parseCards(board);
+  const suits = ['s', 'h', 'd', 'c'];
+  for (const S of suits) {
+    const heroS = hero.filter((c) => c.suit.toLowerCase() === S);
+    const boardS = boardCards.filter((c) => c.suit.toLowerCase() === S);
+    if (heroS.length >= 2 && heroS.length + boardS.length >= 4) {
+      const onBoard = new Set(boardS.map((c) => c.rank.toUpperCase()));
+      // Highest rank of suit S that is NOT already on the board.
+      let nutRank: string | null = null;
+      for (let i = RANK_ORDER.length - 1; i >= 0; i--) {
+        const r = RANK_ORDER[i];
+        if (!onBoard.has(r)) { nutRank = r; break; }
+      }
+      if (nutRank === null) return false;
+      return heroS.some((c) => c.rank.toUpperCase() === nutRank);
+    }
+  }
+  return false;
+}
 
 export type ResultContext = { game: string; board?: string; players: { name: string; cards: string }[] };
 export type BuildQueryResult = { resolvedQuery: string; result: PQLResult; viz: VizSpec; context: ResultContext; heroDraws?: HeroDraws };
@@ -55,9 +87,23 @@ async function computeHeroDraws(
   const query = `select ${select} from ${fromParts.join(', ')}`;
   const { values } = await runPql(query, { trials: 400 });
 
+  const flushDraw = (values.fd ?? 0) > 0;
+  // Nut-flush-draw status is pure card logic (engine-truth, no probe needed) and
+  // is only meaningful when a flush draw actually exists. Best-effort: never let a
+  // parse error break the main result.
+  let nutFlushDraw = false;
+  if (flushDraw) {
+    try {
+      nutFlushDraw = nutFlushDrawStatus(intent.players[heroIdx].cards, intent.board ?? '');
+    } catch {
+      nutFlushDraw = false;
+    }
+  }
+
   return {
     player: intent.players[heroIdx].name,
-    flushDraw: (values.fd ?? 0) > 0,
+    flushDraw,
+    nutFlushDraw,
     straightDraw: (values.sd ?? 0) > 0,
     oesd: (values.od ?? 0) > 0,
     gutshot: (values.gs ?? 0) > 0,

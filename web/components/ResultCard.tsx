@@ -133,7 +133,7 @@ function MatchupHeader({ context, viz }: { context: ResultContext; viz: VizSpec 
             >
               <span className="w-8 shrink-0 text-zinc-500">P{idx + 1}</span>
               {isConcreteHand(pl.cards)
-                ? <CardRow cards={pl.cards} />
+                ? <CardRow cards={pl.cards} fan />
                 : <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-zinc-200">{rangeLabel(pl.cards)}</span>}
               {typeof pct === 'number' && (
                 <span className={`ml-auto tabular-nums ${isHero ? 'font-semibold text-zinc-100' : 'text-zinc-400'}`}>
@@ -151,7 +151,10 @@ function MatchupHeader({ context, viz }: { context: ResultContext; viz: VizSpec 
 // Engine-verified draws as pills: ONE pill per true draw with nonzero outs.
 function drawsPills(d: HeroDraws): { label: string }[] {
   const pills: { label: string }[] = [];
-  if (d.flushDraw) pills.push({ label: d.flushOuts > 0 ? `Flush draw · ${d.flushOuts} outs` : 'Flush draw' });
+  if (d.flushDraw) {
+    const fd = d.nutFlushDraw ? 'Nut flush draw' : 'Flush draw';
+    pills.push({ label: d.flushOuts > 0 ? `${fd} · ${d.flushOuts} outs` : fd });
+  }
   if (d.oesd) pills.push({ label: d.straightOuts > 0 ? `Open-ended straight draw · ${d.straightOuts} outs` : 'Open-ended straight draw' });
   else if (d.straightDraw) pills.push({ label: d.straightOuts > 0 ? `Straight draw · ${d.straightOuts} outs` : 'Straight draw' });
   if (d.gutshot) pills.push({ label: 'Gutshot' });

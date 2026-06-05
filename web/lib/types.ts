@@ -17,6 +17,7 @@ export type RawResult = { query: string; result: PQLResult };
 export type HeroDraws = {
   player: string;
   flushDraw: boolean;
+  nutFlushDraw: boolean;
   straightDraw: boolean;
   oesd: boolean;
   gutshot: boolean;

@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import type { RawResult } from '@/lib/types';
 import { CardRow } from '@/components/viz/CardRow';
+import { isConcreteHand } from '@/lib/cards';
 import { ShareButton } from '@/components/ShareButton';
 import { BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Cell } from 'recharts';
 import { PLAYER_COLORS, ACCENTS } from '@/components/viz/theme';
@@ -45,7 +46,7 @@ export function RawResultCard({ data }: { data: RawResult }) {
         )}
         {board && (<span className="flex items-center gap-1">board <CardRow cards={board} /></span>)}
         {players.map((p) => (
-          <span key={p.name} className="flex items-center gap-1">{p.name} <CardRow cards={p.cards} /></span>
+          <span key={p.name} className="flex items-center gap-1">{p.name} <CardRow cards={p.cards} fan={isConcreteHand(p.cards)} /></span>
         ))}
       </div>
 

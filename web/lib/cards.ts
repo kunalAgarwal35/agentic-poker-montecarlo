@@ -5,6 +5,13 @@ export const SUIT_COLOR: Record<string, string> = {
   s: '#e5e7eb', h: '#f87171', d: '#60a5fa', c: '#4ade80',
 };
 
+// 4-color deck tuned for a LIGHT/near-white card face: spades near-black (the
+// light SUIT_COLOR spade would be invisible on white), hearts red, diamonds
+// blue, clubs green — all with enough contrast to read on #fafafa.
+export const SUIT_COLOR_ON_LIGHT: Record<string, string> = {
+  s: '#111827', h: '#dc2626', d: '#2563eb', c: '#16a34a',
+};
+
 export function parseCards(s: string): { rank: string; suit: string }[] {
   const out: { rank: string; suit: string }[] = [];
   for (let i = 0; i + 1 < s.length; i += 2) {

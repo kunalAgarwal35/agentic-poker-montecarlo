@@ -91,7 +91,7 @@ describe('ResultCard', () => {
   });
 
   it('renders engine-checked draw pills listing only the true draws', () => {
-    const heroDraws = { player: 'PLAYER_1', flushDraw: true, straightDraw: false, oesd: false, gutshot: true, flushOuts: 9, straightOuts: 0 };
+    const heroDraws = { player: 'PLAYER_1', flushDraw: true, nutFlushDraw: false, straightDraw: false, oesd: false, gutshot: true, flushOuts: 9, straightOuts: 0 };
     const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
     expect(container.textContent).toContain('Engine-checked draws');
     expect(container.textContent).toContain('Flush draw · 9 outs');
@@ -99,14 +99,20 @@ describe('ResultCard', () => {
     expect(container.textContent).not.toContain('straight draw'); // straight is false → omitted
   });
 
+  it('labels a nut flush draw distinctly from a plain flush draw', () => {
+    const heroDraws = { player: 'PLAYER_1', flushDraw: true, nutFlushDraw: true, straightDraw: false, oesd: false, gutshot: false, flushOuts: 9, straightOuts: 0 };
+    const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
+    expect(container.textContent).toContain('Nut flush draw · 9 outs');
+  });
+
   it('labels an open-ended straight draw distinctly', () => {
-    const heroDraws = { player: 'PLAYER_1', flushDraw: false, straightDraw: true, oesd: true, gutshot: false, flushOuts: 0, straightOuts: 8 };
+    const heroDraws = { player: 'PLAYER_1', flushDraw: false, nutFlushDraw: false, straightDraw: true, oesd: true, gutshot: false, flushOuts: 0, straightOuts: 8 };
     const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
     expect(container.textContent).toContain('Open-ended straight draw · 8 outs');
   });
 
   it('omits the draws section when no draw is present', () => {
-    const heroDraws = { player: 'PLAYER_1', flushDraw: false, straightDraw: false, oesd: false, gutshot: false, flushOuts: 0, straightOuts: 0 };
+    const heroDraws = { player: 'PLAYER_1', flushDraw: false, nutFlushDraw: false, straightDraw: false, oesd: false, gutshot: false, flushOuts: 0, straightOuts: 0 };
     const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
     expect(container.textContent).not.toContain('Engine-checked draws');
   });
