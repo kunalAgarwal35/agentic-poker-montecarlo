@@ -21,9 +21,13 @@ import { PokerCard } from '@/components/viz/PokerCard';
 // Each card is the same absolute element (left:50%, bottom:ANCHOR_BOTTOM_PX),
 // pre-centered with translateX(-50%); only the rotation differs, so rotating
 // around the shared low pivot fans them out with no per-card translateY.
-const STEP_MAX = 8; // cap per-card tilt (deg) so a 2-card hand sits at ±4°, not splayed
-const STEP_BUDGET = 30; // spread budget divided by (n+1); wider hands fan gentler
-const ORIGIN_Y_PCT = 220; // pivot Y as % of card height → ~1.2× card-height BELOW the card
+const STEP_MAX = 10; // cap per-card tilt (deg) so a 2-card hand sits at ±5°, not splayed
+const STEP_BUDGET = 48; // spread budget divided by (n+1); wider hands fan gentler (5-card → 8°)
+const ORIGIN_Y_PCT = 270; // pivot Y as % of card height → ~2.2× card-height BELOW the card.
+// A LOWER pivot (bigger %) = a longer radius, so each degree of tilt sweeps the
+// card further sideways: that is what keeps the cards from piling on top of each
+// other and leaves every card's top-left rank+suit index legible. Too high a
+// pivot (e.g. 220) clumps a 5-card PLO hand into an unreadable overlap.
 const ANCHOR_BOTTOM_PX = 6; // lift the whole fan off the container floor a touch
 
 // Card size in px (PokerCard default 'md' = w-9 h-12 = 36×48). Drives the sized
@@ -31,8 +35,8 @@ const ANCHOR_BOTTOM_PX = 6; // lift the whole fan off the container floor a touc
 // neither clips its rotated corners nor overlaps the row label / next element.
 const CARD_W = 36;
 const CARD_H = 48;
-const SPREAD_X = 18; // horizontal room each extra card adds to the container width
-const ARC_PAD_Y = 14; // extra height for the arc the rotated cards sweep through
+const SPREAD_X = 20; // horizontal room each extra card adds to the container width
+const ARC_PAD_Y = 20; // extra height for the arc the rotated cards sweep through
 
 export function CardRow({ cards, fan = false }: { cards: string; fan?: boolean }) {
   const parsed = parseCards(cards);
