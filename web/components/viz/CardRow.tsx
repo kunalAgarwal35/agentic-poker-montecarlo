@@ -3,40 +3,31 @@ import { parseCards } from '@/lib/cards';
 import { PokerCard } from '@/components/viz/PokerCard';
 
 // A row of cards. `fan` false (default) → a flat, gapped row for board /
-// community cards. `fan` true → the classic CSS playing-card fan: all cards are
-// absolutely positioned, anchored to the SAME spot (horizontal center, bottom
-// of the container) and each rotated by a few degrees around a SINGLE SHARED
-// PIVOT well below the cards. They radiate from that one low point — like a hand
-// gripped at the bottom — so they overlap into one cohesive arc instead of
-// floating at mismatched heights. Board cards must NOT fan.
+// community cards. `fan` true → the classic playing-card fan, the way a player
+// holds hole cards: tilted, overlapping, radiating from a low grip.
 //
-// ── Tuning knobs (presentation-only; the look is driven entirely by these) ──
-// The coordinator screenshots the render and tweaks ORIGIN_Y_PCT / STEP_MAX if
-// the arch is too tight or too wide. Keep them here, named and together.
+// ── Geometry: an explicit circular arc ───────────────────────────────────────
+// Earlier fans drove the horizontal spread from the rotation (rotate-around-a-
+// shared-pivot), which made the spacing depend on sin(angle) and on how the
+// per-card step shrank as the hand grew — so wide PLO hands kept clumping. Here
+// the HORIZONTAL SPACING IS STRUCTURAL: card i sits at x = (i - mid) * GAP_X,
+// dead even for every card count. Each card's tilt and its vertical dip are then
+// DERIVED from that x so the cards lie on one circular arc of radius ARC_R whose
+// centre is GRIP below the row — a real hand fanned at a low grip:
+//   x      = (i - mid) * GAP_X              — even spacing, the invariant
+//   angle  = asin(x / ARC_R)               — tilt along the arc's radius
+//   dip    = ARC_R * (1 - cos(angle))      — outer cards ride a touch lower
+// Right card stacks over left (zIndex i), and every card's rank+suit index lives
+// in its TOP-LEFT corner — the one spot the next card never covers — so all
+// indices stay legible no matter how tight the overlap. Board cards must NOT fan.
 //
-// Geometry per card i of n (centered on mid = (n-1)/2):
-//   step   = min(STEP_MAX, STEP_BUDGET / (n + 1))  — per-card tilt, shrinks as n grows
-//   angle  = (i - mid) * step                       — outer cards tilt away from center
-//   pivot  = transform-origin 50% ORIGIN_Y_PCT      — a single point below all cards
-// Each card is the same absolute element (left:50%, bottom:ANCHOR_BOTTOM_PX),
-// pre-centered with translateX(-50%); only the rotation differs, so rotating
-// around the shared low pivot fans them out with no per-card translateY.
-const STEP_MAX = 10; // cap per-card tilt (deg) so a 2-card hand sits at ±5°, not splayed
-const STEP_BUDGET = 48; // spread budget divided by (n+1); wider hands fan gentler (5-card → 8°)
-const ORIGIN_Y_PCT = 270; // pivot Y as % of card height → ~2.2× card-height BELOW the card.
-// A LOWER pivot (bigger %) = a longer radius, so each degree of tilt sweeps the
-// card further sideways: that is what keeps the cards from piling on top of each
-// other and leaves every card's top-left rank+suit index legible. Too high a
-// pivot (e.g. 220) clumps a 5-card PLO hand into an unreadable overlap.
-const ANCHOR_BOTTOM_PX = 6; // lift the whole fan off the container floor a touch
-
-// Card size in px (PokerCard default 'md' = w-9 h-12 = 36×48). Drives the sized
-// relative container so the absolute children reserve layout space and the fan
-// neither clips its rotated corners nor overlaps the row label / next element.
-const CARD_W = 36;
-const CARD_H = 48;
-const SPREAD_X = 20; // horizontal room each extra card adds to the container width
-const ARC_PAD_Y = 20; // extra height for the arc the rotated cards sweep through
+// Tuning knobs (presentation-only): the coordinator screenshots and tweaks these.
+const CARD_W = 36; // PokerCard 'md' width — the fan always uses a fixed size so geometry is deterministic
+const CARD_H = 48; // PokerCard 'md' height
+const GAP_X = 19; // even horizontal step between adjacent cards (px). ~half a card → the top-left index always shows
+const ARC_R = 130; // radius of the arc the cards sit on (px). Bigger = flatter arc + gentler tilt; smaller = curvier
+const ARC_PAD_TOP = 6; // breathing room above the highest (centre) card
+const ROT_PAD_X = 16; // side room for the rotated outer cards' corners so the container never clips them
 
 export function CardRow({ cards, fan = false }: { cards: string; fan?: boolean }) {
   const parsed = parseCards(cards);
@@ -52,37 +43,38 @@ export function CardRow({ cards, fan = false }: { cards: string; fan?: boolean }
 
   const n = parsed.length;
   const mid = (n - 1) / 2;
-  // Per-card tilt: gentle for 2 cards, scaled down so wider PLO fans stay tidy.
-  const step = Math.min(STEP_MAX, STEP_BUDGET / (n + 1));
 
-  // Sized relative container: fits the fan so the absolutely-positioned children
-  // reserve real layout space (no clipping, no overlap of neighbours).
-  const width = CARD_W + (n - 1) * SPREAD_X;
-  const height = CARD_H + ARC_PAD_Y;
+  // Pre-compute each card's place on the arc from its even x position.
+  const placed = parsed.map((c, i) => {
+    const x = (i - mid) * GAP_X; // EVEN spacing — the structural invariant
+    const angleRad = Math.asin(Math.max(-0.95, Math.min(0.95, x / ARC_R)));
+    const angleDeg = (angleRad * 180) / Math.PI;
+    const dip = ARC_R * (1 - Math.cos(angleRad)); // outer cards sit slightly lower
+    return { c, x, angleDeg, dip };
+  });
+  const maxDip = Math.max(...placed.map((p) => p.dip));
+
+  // Sized relative container so the absolutely-positioned cards reserve real
+  // layout space (no clipping, no overlap of the row label or next element).
+  const width = CARD_W + (n - 1) * GAP_X + 2 * ROT_PAD_X;
+  const height = CARD_H + maxDip + ARC_PAD_TOP;
 
   return (
-    <span
-      className="relative inline-block align-middle"
-      style={{ width, height }}
-    >
-      {parsed.map((c, i) => {
-        const angle = (i - mid) * step;
-        return (
-          <span
-            key={i}
-            className="absolute"
-            style={{
-              left: '50%',
-              bottom: ANCHOR_BOTTOM_PX,
-              transformOrigin: `50% ${ORIGIN_Y_PCT}%`,
-              transform: `translateX(-50%) rotate(${angle}deg)`,
-              zIndex: i,
-            }}
-          >
-            <PokerCard rank={c.rank} suit={c.suit} />
-          </span>
-        );
-      })}
+    <span className="relative inline-block align-middle" style={{ width, height }}>
+      {placed.map(({ c, x, angleDeg, dip }, i) => (
+        <span
+          key={i}
+          className="absolute"
+          style={{
+            left: '50%',
+            top: ARC_PAD_TOP,
+            transform: `translateX(-50%) translate(${x}px, ${dip}px) rotate(${angleDeg}deg)`,
+            zIndex: i,
+          }}
+        >
+          <PokerCard rank={c.rank} suit={c.suit} />
+        </span>
+      ))}
     </span>
   );
 }
