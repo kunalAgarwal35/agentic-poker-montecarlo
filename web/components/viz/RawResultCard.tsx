@@ -1,4 +1,5 @@
 'use client';
+import { useState } from 'react';
 import type { RawResult } from '@/lib/types';
 import { CardRow } from '@/components/viz/CardRow';
 import { ShareButton } from '@/components/ShareButton';
@@ -27,14 +28,21 @@ export function RawResultCard({ data }: { data: RawResult }) {
   const usedWhere = /\bwhere\b/i.test(query);
   const scalarCols = result.columns.filter((c) => c in result.values);
   const histCols = result.columns.filter((c) => result.histograms != null && c in result.histograms);
+  const [open, setOpen] = useState(false);
   const shareSummary = scalarCols.length
     ? `Poker math — ${scalarCols.map((c) => `${c} ${fmtScalar(result.values[c])}`).join(', ')}`
     : undefined;
 
   return (
-    <div className="rounded-xl border border-zinc-700 bg-zinc-900/60 p-3 text-sm">
-      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-zinc-400">
-        {game && <span className="font-medium text-zinc-300">{game}</span>}
+    <div className="relative my-2 rounded-xl border border-zinc-700 bg-zinc-900/60 p-4 text-sm">
+      <span className="absolute right-3 top-3 text-[10px] text-zinc-500">
+        {result.trials.toLocaleString()} {usedWhere ? 'matching trials' : 'trials'} · {result.mode === 'enumeration' ? 'exact' : 'Monte Carlo'}
+      </span>
+
+      <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 pr-24 text-xs text-zinc-400">
+        {game && (
+          <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-medium text-zinc-400">{game}</span>
+        )}
         {board && (<span className="flex items-center gap-1">board <CardRow cards={board} /></span>)}
         {players.map((p) => (
           <span key={p.name} className="flex items-center gap-1">{p.name} <CardRow cards={p.cards} /></span>
@@ -42,16 +50,14 @@ export function RawResultCard({ data }: { data: RawResult }) {
       </div>
 
       {scalarCols.length > 0 && (
-        <table className="mb-2 w-full text-left">
-          <tbody>
-            {scalarCols.map((c) => (
-              <tr key={c} className="border-t border-zinc-800">
-                <td className="py-1 pr-3 font-mono text-zinc-400">{c}</td>
-                <td className="py-1 font-medium text-zinc-100">{fmtScalar(result.values[c])}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="mb-3 flex flex-wrap gap-3">
+          {scalarCols.map((c) => (
+            <div key={c} className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
+              <div className="font-mono text-[10px] uppercase tracking-wide text-zinc-500">{c}</div>
+              <div className="text-2xl font-bold tabular-nums text-zinc-50">{fmtScalar(result.values[c])}</div>
+            </div>
+          ))}
+        </div>
       )}
 
       {histCols.map((c) => {
@@ -61,7 +67,7 @@ export function RawResultCard({ data }: { data: RawResult }) {
           pct: result.trials ? (p.count / result.trials) * 100 : 0,
         }));
         return (
-          <div key={c} className="mb-1">
+          <div key={c} className="mb-2">
             <div className="mb-1 font-mono text-xs text-zinc-400">{c}</div>
             <ResponsiveContainer width="100%" height={Math.max(120, rows.length * 26)}>
               <BarChart data={rows} layout="vertical" margin={{ left: 8, right: 24 }}>
@@ -79,16 +85,13 @@ export function RawResultCard({ data }: { data: RawResult }) {
         );
       })}
 
-      <div className="mt-1 text-xs text-zinc-500">
-        {result.trials.toLocaleString()} {usedWhere ? 'matching trials' : 'trials'} · {result.mode === 'enumeration' ? 'exact' : 'Monte Carlo'}
+      <div className="mt-3 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
+        <button type="button" onClick={() => setOpen((o) => !o)} className="hover:text-zinc-300">
+          {open ? 'Hide' : 'Show'} query
+        </button>
+        <ShareButton summary={shareSummary} className="text-xs text-zinc-500 hover:text-zinc-300" />
       </div>
-      <details className="mt-1 text-xs text-zinc-500">
-        <summary className="cursor-pointer">query</summary>
-        <code className="block whitespace-pre-wrap break-all pt-1 text-zinc-400">{query}</code>
-      </details>
-      <div className="-ml-3">
-        <ShareButton summary={shareSummary} />
-      </div>
+      {open && <code className="mt-2 block whitespace-pre-wrap break-all rounded bg-black/40 p-2 text-xs text-zinc-300">{query}</code>}
     </div>
   );
 }

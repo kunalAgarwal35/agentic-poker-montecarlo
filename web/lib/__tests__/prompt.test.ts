@@ -25,6 +25,13 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/pot odds|break-even/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/rule of 2|rule-of-2/i);
   });
+  it('bans preamble filler and requires the verdict in the first words', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/first words/i);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/never begin with|no preamble/i);
+  });
+  it('requires clean finished percentages, not raw arithmetic', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/rule of 2-and-4|resulting percentage|finished percentage/i);
+  });
   it('enforces commentary accuracy (no invented board specifics)', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/commentary accuracy/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/invent/i);

@@ -15,6 +15,15 @@ describe('ResultViz', () => {
     expect(screen.getByText('46.0%')).toBeInTheDocument();
   });
 
+  it('lists the full player name + equity in the equity legend', () => {
+    const spec: VizSpec = { kind: 'equity', mode: 'monte_carlo', trials: 100, rows: [
+      { name: 'PLAYER_1', equity: 0.6, isHero: true }, { name: 'PLAYER_2', equity: 0.4, isHero: false }] };
+    const { container } = render(<ResultViz spec={spec} />);
+    // Legend keeps the full readable name + the precise %.
+    expect(container.textContent).toContain('PLAYER_1');
+    expect(container.textContent).toContain('60.0%');
+  });
+
   it('renders a win-tie-loss summary', () => {
     const spec: VizSpec = { kind: 'win-tie-loss', mode: 'monte_carlo', trials: 100, rows: [
       { name: 'Hero', win: 0.8, tie: 0.04, loss: 0.16 }] };

@@ -6,6 +6,8 @@ export const ACCENTS = {
   bar: '#388bfd',
   grid: '#30363d',
   text: '#8b949e',
+  behind: '#f85149',
+  coinflip: '#d29922',
 };
 
 export const PLAYER_COLORS = [ACCENTS.hero, ACCENTS.third, ACCENTS.fourth, '#db61a2', '#1f6feb'];

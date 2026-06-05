@@ -4,7 +4,7 @@ import { track } from '@/lib/analytics';
 
 const APP_URL = 'https://agentic-poker-montecarlo.vercel.app';
 
-export function ShareButton({ summary }: { summary?: string }) {
+export function ShareButton({ summary, className }: { summary?: string; className?: string }) {
   const [copied, setCopied] = useState(false);
 
   async function onShare() {
@@ -31,7 +31,7 @@ export function ShareButton({ summary }: { summary?: string }) {
     <button
       type="button"
       onClick={onShare}
-      className="mt-3 ml-3 text-xs text-zinc-500 hover:text-zinc-300"
+      className={className ?? 'mt-3 ml-3 text-xs text-zinc-500 hover:text-zinc-300'}
     >
       {copied ? 'Copied!' : 'Share'}
     </button>

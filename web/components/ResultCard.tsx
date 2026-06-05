@@ -1,10 +1,11 @@
 'use client';
 import { useState } from 'react';
-import type { VizSpec, HeroDraws } from '@/lib/types';
+import type { VizSpec, HeroDraws, EquityRow, WinTieLossRow } from '@/lib/types';
 import type { ResultContext } from '@/lib/buildQuery';
 import { ResultViz } from '@/components/viz/ResultViz';
 import { CardRow } from '@/components/viz/CardRow';
 import { ShareButton } from '@/components/ShareButton';
+import { ACCENTS } from '@/components/viz/theme';
 import { isConcreteHand, rangeLabel } from '@/lib/cards';
 
 function modeBadge(viz: VizSpec) {
@@ -23,60 +24,159 @@ function shareSummary(viz: VizSpec): string | undefined {
   return undefined;
 }
 
-function SetupHeader({ context }: { context: ResultContext }) {
-  const hasBoard = !!context.board && context.board.length > 0;
+// The "headline" pct keyed by player name, used both for the verdict and to
+// co-locate each player's number next to their cards in the matchup header.
+// Only equity / heads-up win-tie-loss vizzes expose a single hero number.
+function headlinePcts(viz: VizSpec): { byName: Record<string, number>; hero?: { name: string; pct: number } } | null {
+  if (viz.kind === 'equity') {
+    const rows = viz.rows as EquityRow[];
+    if (!rows.length) return null;
+    const byName: Record<string, number> = {};
+    rows.forEach((r) => { byName[r.name] = r.equity; });
+    const heroRow = rows.find((r) => r.isHero) ?? rows[0];
+    return { byName, hero: { name: heroRow.name, pct: heroRow.equity } };
+  }
+  if (viz.kind === 'win-tie-loss') {
+    const rows = viz.rows as WinTieLossRow[];
+    if (!rows.length) return null;
+    const byName: Record<string, number> = {};
+    rows.forEach((r) => { byName[r.name] = r.win; });
+    return { byName, hero: { name: rows[0].name, pct: rows[0].win } };
+  }
+  return null;
+}
+
+type Verdict = { label: 'Ahead' | 'Behind' | 'Coinflip'; color: string };
+function verdictFor(pct: number): Verdict {
+  if (pct >= 0.55) return { label: 'Ahead', color: ACCENTS.hero };
+  if (pct <= 0.45) return { label: 'Behind', color: ACCENTS.behind };
+  return { label: 'Coinflip', color: ACCENTS.coinflip };
+}
+
+// The headline verdict row: only for equity / win-tie-loss with exactly 2 rows
+// (heads-up). Multiway and other viz kinds skip it.
+function VerdictBadge({ viz }: { viz: VizSpec }) {
+  const rowCount =
+    viz.kind === 'equity' ? viz.rows.length :
+    viz.kind === 'win-tie-loss' ? viz.rows.length : 0;
+  if ((viz.kind !== 'equity' && viz.kind !== 'win-tie-loss') || rowCount !== 2) return null;
+  const head = headlinePcts(viz);
+  if (!head?.hero) return null;
+  const { name, pct } = head.hero;
+  const v = verdictFor(pct);
   return (
-    <div className="mb-2 flex flex-col gap-1 text-xs">
-      {context.game && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="w-10 shrink-0 text-zinc-500">Game</span>
-          <span className="font-medium text-zinc-300">{context.game}</span>
-        </div>
-      )}
-      {hasBoard && (
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="w-10 shrink-0 text-zinc-500">Board</span>
-          <CardRow cards={context.board as string} />
-        </div>
-      )}
-      {context.players.map((pl, idx) => (
-        <div key={pl.name} className="flex flex-wrap items-center gap-x-2 gap-y-1">
-          <span className="w-10 shrink-0 text-zinc-500">P{idx + 1}</span>
-          {isConcreteHand(pl.cards)
-            ? <CardRow cards={pl.cards} />
-            : <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-zinc-200">{rangeLabel(pl.cards)}</span>}
-        </div>
-      ))}
+    <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: v.color }} aria-hidden />
+      <span className="font-semibold text-zinc-100">
+        {name} {v.label.toLowerCase()}
+      </span>
+      <span className="text-zinc-500">—</span>
+      <span className="text-xl font-bold tabular-nums text-zinc-50">{Math.round(pct * 100)}%</span>
+      <span
+        className="ml-auto rounded-full px-2 py-0.5 text-xs font-semibold"
+        style={{ color: v.color, background: `${v.color}1f`, border: `1px solid ${v.color}55` }}
+      >
+        {v.label}
+      </span>
     </div>
   );
 }
 
-// Engine-verified draws line: lists ONLY the true draws + nonzero out counts.
-function drawsSummary(d: HeroDraws): string | undefined {
-  const parts: string[] = [];
-  if (d.flushDraw) parts.push(d.flushOuts > 0 ? `flush draw (${d.flushOuts} outs)` : 'flush draw');
-  if (d.oesd) parts.push('OESD');
-  else if (d.straightDraw) parts.push('straight draw');
-  if (d.gutshot) parts.push('gutshot');
-  if (!parts.length) return undefined;
-  return `Engine-checked draws: ${parts.join(', ')}`;
+// Redesigned matchup header: game chip, board row, and a co-located row per
+// player (cards / range pill + their inline % when the viz exposes one).
+function MatchupHeader({ context, viz }: { context: ResultContext; viz: VizSpec }) {
+  const hasBoard = !!context.board && context.board.length > 0;
+  const head = headlinePcts(viz);
+  const pctSuffix = viz.kind === 'win-tie-loss' ? ' win' : '';
+  return (
+    <div className="mb-3 text-xs">
+      {context.game && (
+        <div className="mb-2 flex justify-end">
+          <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-medium text-zinc-400">
+            {context.game}
+          </span>
+        </div>
+      )}
+      {hasBoard && (
+        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="w-10 shrink-0 uppercase tracking-wide text-zinc-500">Board</span>
+          <CardRow cards={context.board as string} />
+        </div>
+      )}
+      <div className="flex flex-col gap-1.5">
+        {context.players.map((pl, idx) => {
+          const isHero = head?.hero?.name === pl.name;
+          const pct = head?.byName[pl.name];
+          return (
+            <div
+              key={pl.name}
+              className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border-l-2 py-1 pl-2"
+              style={isHero
+                ? { borderColor: ACCENTS.hero, background: `${ACCENTS.hero}14` }
+                : { borderColor: 'transparent' }}
+            >
+              <span className="w-8 shrink-0 text-zinc-500">P{idx + 1}</span>
+              {isConcreteHand(pl.cards)
+                ? <CardRow cards={pl.cards} />
+                : <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-zinc-200">{rangeLabel(pl.cards)}</span>}
+              {typeof pct === 'number' && (
+                <span className={`ml-auto tabular-nums ${isHero ? 'font-semibold text-zinc-100' : 'text-zinc-400'}`}>
+                  {(pct * 100).toFixed(1)}%{pctSuffix}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// Engine-verified draws as pills: ONE pill per true draw with nonzero outs.
+function drawsPills(d: HeroDraws): { label: string }[] {
+  const pills: { label: string }[] = [];
+  if (d.flushDraw) pills.push({ label: d.flushOuts > 0 ? `Flush draw · ${d.flushOuts} outs` : 'Flush draw' });
+  if (d.oesd) pills.push({ label: d.straightOuts > 0 ? `Open-ended straight draw · ${d.straightOuts} outs` : 'Open-ended straight draw' });
+  else if (d.straightDraw) pills.push({ label: d.straightOuts > 0 ? `Straight draw · ${d.straightOuts} outs` : 'Straight draw' });
+  if (d.gutshot) pills.push({ label: 'Gutshot' });
+  return pills;
+}
+
+function DrawsPills({ heroDraws }: { heroDraws: HeroDraws }) {
+  const pills = drawsPills(heroDraws);
+  if (!pills.length) return null;
+  return (
+    <div className="mt-3">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-600">Engine-checked draws</div>
+      <div className="flex flex-wrap gap-1.5">
+        {pills.map((p) => (
+          <span
+            key={p.label}
+            className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-xs font-medium text-sky-300"
+          >
+            {p.label}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 export function ResultCard({ resolvedQuery, viz, context, heroDraws }: { resolvedQuery: string; viz: VizSpec; context?: ResultContext; heroDraws?: HeroDraws }) {
   const [open, setOpen] = useState(false);
-  const draws = heroDraws ? drawsSummary(heroDraws) : undefined;
   return (
-    <div className="my-2 rounded-xl border border-zinc-700 bg-zinc-900 p-3">
-      <div className="mb-2 flex items-center gap-2 text-xs text-zinc-400">
-        <span>{modeBadge(viz)}</span>
-      </div>
-      {context && <SetupHeader context={context} />}
+    <div className="relative my-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+      <span className="absolute right-3 top-3 text-[10px] text-zinc-500">{modeBadge(viz)}</span>
+      <VerdictBadge viz={viz} />
+      {context && <MatchupHeader context={context} viz={viz} />}
       <ResultViz spec={viz} />
-      {draws && <div className="mt-2 text-xs text-zinc-500">{draws}</div>}
-      <button onClick={() => setOpen((o) => !o)} className="mt-3 text-xs text-zinc-500 hover:text-zinc-300">
-        {open ? 'Hide' : 'Show'} query
-      </button>
-      <ShareButton summary={shareSummary(viz)} />
+      {heroDraws && <DrawsPills heroDraws={heroDraws} />}
+      <div className="mt-3 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
+        <button onClick={() => setOpen((o) => !o)} className="hover:text-zinc-300">
+          {open ? 'Hide' : 'Show'} query
+        </button>
+        <ShareButton summary={shareSummary(viz)} className="text-xs text-zinc-500 hover:text-zinc-300" />
+      </div>
       {open && <pre className="mt-2 overflow-auto rounded bg-black/40 p-2 text-xs text-zinc-300">{resolvedQuery}</pre>}
     </div>
   );
