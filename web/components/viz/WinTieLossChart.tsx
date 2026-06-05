@@ -10,7 +10,7 @@ export function WinTieLossChart({ rows }: { rows: WinTieLossRow[] }) {
     <div>
       <div style={{ width: '100%', height: 40 + rows.length * 34 }}>
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data} layout="vertical" stackOffset="expand" margin={{ left: 8, right: 16 }}>
+          <BarChart data={data} layout="vertical" margin={{ left: 8, right: 16 }}>
             <XAxis type="number" domain={[0, 100]} tick={{ fill: ACCENTS.text, fontSize: 10 }} tickFormatter={(v) => `${v}%`} height={18} />
             <YAxis type="category" dataKey="name" width={28} tick={{ fill: ACCENTS.text, fontSize: 12 }} />
             <Tooltip content={<ChartTooltip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
