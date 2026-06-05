@@ -76,7 +76,7 @@ export function ChatMessage({
 
   return (
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-      <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${isUser ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-100'}`}>
+      <div className={`max-w-[85%] rounded-2xl px-3 py-1.5 text-sm ${isUser ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-100'}`}>
         {message.parts.map((part, i) => {
           if (part.type === 'text') {
             // User text stays plain; assistant text is rendered as markdown so
@@ -92,7 +92,7 @@ export function ChatMessage({
           }
           if (part.type === 'tool-build_query' && (part as any).state === 'output-error') {
             return (
-              <div key={i} className="my-2 rounded-xl border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
+              <div key={i} className="my-1.5 rounded-xl border border-red-800 bg-red-950/40 p-2.5 text-sm text-red-200">
                 ⚠ {(part as any).errorText ?? 'Query failed.'}
               </div>
             );
@@ -103,7 +103,7 @@ export function ChatMessage({
           }
           if (part.type === 'tool-run_pql' && (part as any).state === 'output-error') {
             return (
-              <div key={i} className="my-2 rounded-xl border border-red-800 bg-red-950/40 p-3 text-sm text-red-200">
+              <div key={i} className="my-1.5 rounded-xl border border-red-800 bg-red-950/40 p-2.5 text-sm text-red-200">
                 ⚠ {(part as any).errorText ?? 'Query failed.'}
               </div>
             );

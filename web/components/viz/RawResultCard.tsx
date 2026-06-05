@@ -35,12 +35,12 @@ export function RawResultCard({ data }: { data: RawResult }) {
     : undefined;
 
   return (
-    <div className="relative my-2 rounded-xl border border-zinc-700 bg-zinc-900/60 p-4 text-sm">
+    <div className="relative my-1.5 rounded-xl border border-zinc-700 bg-zinc-900/60 p-3 text-sm">
       <span className="absolute right-3 top-3 text-[10px] text-zinc-500">
         {result.trials.toLocaleString()} {usedWhere ? 'matching trials' : 'trials'} · {result.mode === 'enumeration' ? 'exact' : 'Monte Carlo'}
       </span>
 
-      <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 pr-24 text-xs text-zinc-400">
+      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-0.5 pr-24 text-xs text-zinc-400">
         {game && (
           <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-medium text-zinc-400">{game}</span>
         )}
@@ -51,7 +51,7 @@ export function RawResultCard({ data }: { data: RawResult }) {
       </div>
 
       {scalarCols.length > 0 && (
-        <div className="mb-3 flex flex-wrap gap-3">
+        <div className="mb-2 flex flex-wrap gap-2">
           {scalarCols.map((c) => (
             <div key={c} className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2">
               <div className="font-mono text-[10px] uppercase tracking-wide text-zinc-500">{c}</div>
@@ -86,7 +86,7 @@ export function RawResultCard({ data }: { data: RawResult }) {
         );
       })}
 
-      <div className="mt-3 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
+      <div className="mt-2 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
         <button type="button" onClick={() => setOpen((o) => !o)} className="hover:text-zinc-300">
           {open ? 'Hide' : 'Show'} query
         </button>

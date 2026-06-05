@@ -45,7 +45,7 @@ async function captureRecent(question: string, parts: any[]) {
 export function Chat() {
   const [input, setInput] = useState('');
   const lastQuestionRef = useRef('');
-  const { messages, sendMessage, status, error, regenerate } = useChat({
+  const { messages, sendMessage, status, error, regenerate, setMessages } = useChat({
     onFinish: ({ message }) => {
       captureRecent(lastQuestionRef.current, message.parts as any[]);
       for (const p of (message.parts as any[]) ?? []) {
@@ -73,6 +73,15 @@ export function Chat() {
     return '';
   }
 
+  // Return to the empty/start state (Hero + examples) without a page refresh.
+  // useChat exposes setMessages, so clearing it re-shows the empty-state block.
+  function resetChat() {
+    setMessages([]);
+    setInput('');
+    lastQuestionRef.current = '';
+    track('new_chat');
+  }
+
   function onRetry(question: string, reason: string) {
     const reasonLabel = reason ? REASON_LABELS[reason] ?? '' : '';
     const text = `That last answer wasn't quite right${
@@ -83,9 +92,29 @@ export function Chat() {
   }
 
   return (
-    <div className="mx-auto flex h-screen max-w-2xl flex-col p-4">
-      <h1 className="mb-3 text-sm font-medium text-zinc-500">agentic-poker-montecarlo</h1>
-      <div className="flex flex-1 flex-col gap-3 overflow-y-auto pb-4">
+    <div className="mx-auto flex h-screen max-w-2xl flex-col p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h1 className="text-sm font-medium text-zinc-500">
+          <button
+            type="button"
+            onClick={resetChat}
+            className="cursor-pointer rounded transition-colors hover:text-zinc-300 focus:outline-none focus-visible:text-zinc-300"
+            aria-label="agentic-poker-montecarlo — start a new chat"
+          >
+            agentic-poker-montecarlo
+          </button>
+        </h1>
+        {messages.length > 0 && (
+          <button
+            type="button"
+            onClick={resetChat}
+            className="shrink-0 rounded-full border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs font-medium text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200"
+          >
+            + New chat
+          </button>
+        )}
+      </div>
+      <div className="flex flex-1 flex-col gap-2 overflow-y-auto pb-3">
         {messages.length === 0 && (
           <>
             <Hero />
@@ -104,7 +133,7 @@ export function Chat() {
         ))}
       </div>
       {error && (
-        <div className="mb-2 rounded-lg border border-red-800 bg-red-950/40 p-2 text-sm text-red-200">
+        <div className="mb-1.5 rounded-lg border border-red-800 bg-red-950/40 p-2 text-sm text-red-200">
           Something went wrong contacting the agent.{' '}
           <button type="button" onClick={() => regenerate()} className="underline hover:text-red-100">Retry</button>
         </div>

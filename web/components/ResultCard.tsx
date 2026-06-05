@@ -89,11 +89,11 @@ function VerdictLine({ viz }: { viz: VizSpec }) {
 // to live inside MatchupHeader, so the three pieces no longer overlap.
 function CardHeader({ viz, game }: { viz: VizSpec; game?: string }) {
   return (
-    <div className="mb-3 flex items-start justify-between gap-3">
+    <div className="mb-2 flex items-start justify-between gap-3">
       <div className="min-w-0">
         <VerdictLine viz={viz} />
       </div>
-      <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+      <div className="flex shrink-0 flex-col items-end gap-0.5 text-right">
         <span className="text-[10px] text-zinc-500">{modeBadge(viz)}</span>
         {game && (
           <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
@@ -112,21 +112,21 @@ function MatchupHeader({ context, viz }: { context: ResultContext; viz: VizSpec 
   const head = headlinePcts(viz);
   const pctSuffix = viz.kind === 'win-tie-loss' ? ' win' : '';
   return (
-    <div className="mb-3 text-xs">
+    <div className="mb-2 text-xs">
       {hasBoard && (
-        <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <div className="mb-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <span className="w-10 shrink-0 uppercase tracking-wide text-zinc-500">Board</span>
           <CardRow cards={context.board as string} />
         </div>
       )}
-      <div className="flex flex-col gap-1.5">
+      <div className="flex flex-col gap-1">
         {context.players.map((pl, idx) => {
           const isHero = head?.hero?.name === pl.name;
           const pct = head?.byName[pl.name];
           return (
             <div
               key={pl.name}
-              className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border-l-2 py-1 pl-2"
+              className="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border-l-2 py-0.5 pl-2"
               style={isHero
                 ? { borderColor: ACCENTS.hero, background: `${ACCENTS.hero}14` }
                 : { borderColor: 'transparent' }}
@@ -165,7 +165,7 @@ function DrawsPills({ heroDraws }: { heroDraws: HeroDraws }) {
   const pills = drawsPills(heroDraws);
   if (!pills.length) return null;
   return (
-    <div className="mt-3">
+    <div className="mt-2">
       <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-600">Engine-checked draws</div>
       <div className="flex flex-wrap gap-1.5">
         {pills.map((p) => (
@@ -184,12 +184,12 @@ function DrawsPills({ heroDraws }: { heroDraws: HeroDraws }) {
 export function ResultCard({ resolvedQuery, viz, context, heroDraws }: { resolvedQuery: string; viz: VizSpec; context?: ResultContext; heroDraws?: HeroDraws }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="my-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+    <div className="my-1.5 rounded-xl border border-zinc-700 bg-zinc-900 p-3">
       <CardHeader viz={viz} game={context?.game} />
       {context && <MatchupHeader context={context} viz={viz} />}
       <ResultViz spec={viz} />
       {heroDraws && <DrawsPills heroDraws={heroDraws} />}
-      <div className="mt-3 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
+      <div className="mt-2 flex items-center gap-3 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
         <button onClick={() => setOpen((o) => !o)} className="hover:text-zinc-300">
           {open ? 'Hide' : 'Show'} query
         </button>

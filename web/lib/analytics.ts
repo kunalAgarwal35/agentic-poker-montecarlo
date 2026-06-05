@@ -7,6 +7,7 @@ export type AnalyticsEvent =
   | 'clarifying_shown'
   | 'recent_opened'
   | 'choice_selected'
+  | 'new_chat'
   | 'feedback_given'
   | 'result_shared'
   | 'agent_error';

@@ -3,18 +3,23 @@ import { parseCards } from '@/lib/cards';
 import { PokerCard } from '@/components/viz/PokerCard';
 
 // A row of cards. `fan` false (default) → a flat, gapped row for board /
-// community cards. `fan` true → the cards overlap and tilt symmetrically around
-// their bottom center, like a hand a player holds (2-card holdem, or a wider
-// PLO fan). Board cards must NOT fan.
+// community cards. `fan` true → the cards overlap and tilt gently and
+// symmetrically around their bottom center, like a hand a player holds
+// (2-card holdem, or a 4–6 card PLO fan). Board cards must NOT fan.
 //
 // Fan geometry per card i of n (centered on (n-1)/2):
-//   angle = (i - mid) * spread   — outer cards tilt away from center
-//   lift  = |i - mid| * LIFT     — outer cards rise to arc the hand
-//   overlap: negative left margin after the first card so they overlap ~30%.
-const SPREAD_DEG = 12; // per-card tilt for a tight 2-card hand
-const MAX_TOTAL_DEG = 32; // cap the total spread so wide (PLO) fans stay tasteful
-const LIFT_PX = 3;
-const OVERLAP_PX = -10;
+//   step  = min(STEP_MAX, TOTAL_CAP / (n-1)) — per-card tilt, shrinks as n grows
+//   angle = (i - mid) * step                  — outer cards tilt away from center
+//   lift  = |i - mid| * LIFT_PX               — a slight arc; flat baseline reads clean
+//   overlap: a small negative left margin so each card's top-left index (rank +
+//   suit) stays fully visible and uncovered by the next card on top of it.
+//
+// Conservative on purpose: a subtle held-hand tilt that stays tidy at 2 cards
+// (Hold'em, ±6°) and gentler still at 4–6 cards (PLO).
+const STEP_MAX = 6; // cap the per-card tilt so a 2-card hand sits at ±6°
+const TOTAL_CAP = 14; // total spread budget; divided across the gaps for wider hands
+const LIFT_PX = 1.5; // a faint arc — outer cards rise just slightly
+const OVERLAP_PX = -8; // cards on a ~36px-wide card; keeps the top-left index readable
 
 export function CardRow({ cards, fan = false }: { cards: string; fan?: boolean }) {
   const parsed = parseCards(cards);
@@ -30,15 +35,16 @@ export function CardRow({ cards, fan = false }: { cards: string; fan?: boolean }
 
   const n = parsed.length;
   const mid = (n - 1) / 2;
-  // Scale the per-card spread down for wider hands so the total fan stays capped.
-  const spread = n > 1 ? Math.min(SPREAD_DEG, MAX_TOTAL_DEG / (n - 1)) : 0;
+  // Per-card tilt: small and fixed for 2 cards, scaled down so wider PLO fans
+  // stay gentle (4 cards ≈ ±7° total per side, 6 cards even less).
+  const step = n > 1 ? Math.min(STEP_MAX, TOTAL_CAP / (n - 1)) : 0;
 
   return (
-    // extra padding/height so the rotated outer corners don't clip
-    <span className="inline-flex items-end px-2 pt-2 align-middle">
+    // a little padding so the rotated outer corners aren't clipped; stays compact
+    <span className="inline-flex items-end px-1.5 pt-1.5 align-middle">
       {parsed.map((c, i) => {
         const offset = i - mid;
-        const angle = offset * spread;
+        const angle = offset * step;
         const lift = Math.abs(offset) * LIFT_PX;
         return (
           <span
