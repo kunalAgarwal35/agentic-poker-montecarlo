@@ -18,11 +18,21 @@ const COMPONENTS = {
   ),
 } as const;
 
+// The model is told to lead with the verdict (no preamble), but it occasionally
+// still opens with an intent sentence like "I'll compute your equity…". Strip a
+// single leading intent-sentence deterministically — but only when substantial
+// answer text follows, so a short reply is never blanked.
+export function stripPreamble(text: string): string {
+  const m = /^\s*(?:I['’]?ll|I will|Let me|Let['’]?s|First,?\s+I['’]?ll|Sure[,!.]?|Okay[,!.]?|Alright[,!.]?|Got it[,!.]?)\b[^.!?\n]*[.!?]\s+/i.exec(text);
+  if (m && text.length - m[0].length > 40) return text.slice(m[0].length);
+  return text;
+}
+
 export function AnswerMarkdown({ text }: { text: string }) {
   return (
     <div className="break-words [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={COMPONENTS}>
-        {text}
+        {stripPreamble(text)}
       </ReactMarkdown>
     </div>
   );
