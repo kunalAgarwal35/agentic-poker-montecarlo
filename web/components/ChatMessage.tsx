@@ -80,7 +80,7 @@ export function ChatMessage({
           if (part.type === 'text') return <span key={i} className="whitespace-pre-wrap break-words">{part.text}</span>;
           if (part.type === 'tool-build_query' && (part as any).state === 'output-available') {
             const out = (part as any).output as BuildQueryResult;
-            return <ResultCard key={i} resolvedQuery={out.resolvedQuery} viz={out.viz} context={out.context} />;
+            return <ResultCard key={i} resolvedQuery={out.resolvedQuery} viz={out.viz} context={out.context} heroDraws={out.heroDraws} />;
           }
           if (part.type === 'tool-build_query' && (part as any).state === 'output-error') {
             return (

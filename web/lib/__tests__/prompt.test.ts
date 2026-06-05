@@ -36,4 +36,9 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/engine tool result|ran .* this turn|did not run an engine/i);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/backdoor/i);
   });
+  it('tells the agent to use heroDraws as the engine-verified source for draws/outs', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/heroDraws/);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/flushOuts/);
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/straightOuts/);
+  });
 });

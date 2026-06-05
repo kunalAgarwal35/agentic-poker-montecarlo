@@ -45,4 +45,19 @@ describe('ResultCard', () => {
     const { container } = render(<ResultCard resolvedQuery="q" viz={viz} />);
     expect(container.textContent).not.toContain('Board');
   });
+
+  it('renders an engine-checked draws line listing only the true draws', () => {
+    const heroDraws = { player: 'PLAYER_1', flushDraw: true, straightDraw: false, oesd: false, gutshot: true, flushOuts: 9, straightOuts: 0 };
+    const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
+    expect(container.textContent).toContain('Engine-checked draws');
+    expect(container.textContent).toContain('flush draw (9 outs)');
+    expect(container.textContent).toContain('gutshot');
+    expect(container.textContent).not.toContain('OESD'); // oesd is false → omitted
+  });
+
+  it('omits the draws line when no draw is present', () => {
+    const heroDraws = { player: 'PLAYER_1', flushDraw: false, straightDraw: false, oesd: false, gutshot: false, flushOuts: 0, straightOuts: 0 };
+    const { container } = render(<ResultCard resolvedQuery="q" viz={viz} heroDraws={heroDraws} />);
+    expect(container.textContent).not.toContain('Engine-checked draws');
+  });
 });

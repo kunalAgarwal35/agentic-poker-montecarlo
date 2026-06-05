@@ -12,6 +12,18 @@ export type PQLResult = {
 
 export type RawResult = { query: string; result: PQLResult };
 
+// Engine-verified draws/outs for a single exact hero hand on a flop/turn board.
+// The agent must describe draws/outs ONLY from this (never its own read).
+export type HeroDraws = {
+  player: string;
+  flushDraw: boolean;
+  straightDraw: boolean;
+  oesd: boolean;
+  gutshot: boolean;
+  flushOuts: number;
+  straightOuts: number;
+};
+
 export type EquityRow = { name: string; equity: number; isHero: boolean };
 export type WinTieLossRow = { name: string; win: number; tie: number; loss: number };
 export type DistributionBar = { token: string; label: string; freq: number };

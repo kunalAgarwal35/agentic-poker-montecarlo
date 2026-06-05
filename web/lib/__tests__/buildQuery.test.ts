@@ -2,10 +2,23 @@ import { describe, it, expect, vi } from 'vitest';
 import { executeBuildQuery } from '@/lib/buildQuery';
 import type { PQLResult } from '@/lib/types';
 
+// The draws probe is a single extra runPql whose query contains 'flushDraw'.
+// Helper to build a runPql mock that answers the draws probe and the main query
+// separately, so tests can assert on each independently.
+function runPqlWith(opts: { main: PQLResult; draws?: PQLResult }) {
+  const mainResult = opts.main;
+  const drawsResult: PQLResult = opts.draws ?? {
+    values: { fd: 0, od: 0, gs: 0, sd: 0, fo: 0, so: 0 },
+    columns: ['fd', 'od', 'gs', 'sd', 'fo', 'so'],
+    trials: 400, mode: 'enumeration', seed: null,
+  };
+  return vi.fn(async (q: string) => (q.includes('flushDraw') ? drawsResult : mainResult));
+}
+
 describe('executeBuildQuery', () => {
   it('compiles, runs the engine, and returns resolvedQuery + result + viz', async () => {
     const fakeResult: PQLResult = { values: { p1: 0.84, p2: 0.16 }, columns: ['p1', 'p2'], trials: 741, mode: 'enumeration', seed: null };
-    const runPql = vi.fn().mockResolvedValue(fakeResult);
+    const runPql = runPqlWith({ main: fakeResult });
 
     const out = await executeBuildQuery(
       {
@@ -20,7 +33,8 @@ describe('executeBuildQuery', () => {
       { runPql },
     );
 
-    expect(runPql).toHaveBeenCalledOnce();
+    // One call for the draws probe (flop + exact hero) and one for the main query.
+    expect(runPql).toHaveBeenCalledTimes(2);
     expect(out.resolvedQuery).toContain("board='2c3c4c'");
     expect(out.result.mode).toBe('enumeration');
     expect(out.viz.kind).toBe('equity');
@@ -37,7 +51,10 @@ describe('executeBuildQuery', () => {
   });
 
   it('routes a graphQuery to runGraph and returns a graph viz', async () => {
-    const runPql = vi.fn();
+    const runPql = vi.fn(async () => ({
+      values: { fd: 0, od: 0, gs: 0, sd: 0, fo: 0, so: 0 },
+      columns: [], trials: 400, mode: 'enumeration', seed: null,
+    } as PQLResult));
     const runGraph = vi.fn().mockResolvedValue({
       kind: 'vsclass',
       rows: [{ category: 'pair', label: 'One Pair', equity: 0.7, freq: 0.6 },
@@ -53,14 +70,13 @@ describe('executeBuildQuery', () => {
       },
       { runPql, runGraph },
     );
-    expect(runPql).not.toHaveBeenCalled();
     expect(runGraph).toHaveBeenCalledOnce();
     expect(out.viz.kind).toBe('equity-vs-class');
     if (out.viz.kind === 'equity-vs-class') expect(out.viz.rows).toHaveLength(2);
   });
 
   it('returns a context carrying game, board, and players', async () => {
-    const runPql = vi.fn().mockResolvedValue({ values: { p1: 0.6, p2: 0.4 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: 1 } as PQLResult);
+    const runPql = runPqlWith({ main: { values: { p1: 0.6, p2: 0.4 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: 1 } });
     const out = await executeBuildQuery(
       {
         game: 'omahahi5',
@@ -74,5 +90,86 @@ describe('executeBuildQuery', () => {
     expect(out.context.players).toEqual([
       { name: 'PLAYER_1', cards: 'AsAhKsKhQs' }, { name: 'PLAYER_2', cards: '25%' },
     ]);
+  });
+
+  describe('heroDraws (engine-verified)', () => {
+    it('attaches heroDraws on a flop board with an exact holdem hero', async () => {
+      const main: PQLResult = { values: { p1: 0.7, p2: 0.3 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: null };
+      const draws: PQLResult = {
+        values: { fd: 400, od: 0, gs: 400, sd: 0, fo: 9, so: 0 },
+        columns: ['fd', 'od', 'gs', 'sd', 'fo', 'so'], trials: 400, mode: 'enumeration', seed: null,
+      };
+      const runPql = runPqlWith({ main, draws });
+      const out = await executeBuildQuery(
+        {
+          game: 'holdem',
+          players: [{ name: 'PLAYER_1', cards: 'KhQh' }, { name: 'PLAYER_2', cards: 'AsAd' }],
+          board: 'Ah7h2c',
+        },
+        { runPql },
+      );
+      expect(out.heroDraws).toEqual({
+        player: 'PLAYER_1',
+        flushDraw: true,
+        straightDraw: false,
+        oesd: false,
+        gutshot: true,
+        flushOuts: 9,
+        straightOuts: 0,
+      });
+    });
+
+    it('picks the hero player by name for heroDraws', async () => {
+      const main: PQLResult = { values: { p1: 0.7, p2: 0.3 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: null };
+      const runPql = runPqlWith({ main });
+      const out = await executeBuildQuery(
+        {
+          game: 'holdem',
+          players: [{ name: 'Hero', cards: 'KhQh' }, { name: 'Villain', cards: 'AsAd' }],
+          board: 'Ah7h2c',
+        },
+        { runPql },
+      );
+      expect(out.heroDraws?.player).toBe('Hero');
+    });
+
+    it('does not attach heroDraws preflop (no board)', async () => {
+      const runPql = runPqlWith({ main: { values: { p1: 0.5, p2: 0.5 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: null } });
+      const out = await executeBuildQuery(
+        { game: 'holdem', players: [{ name: 'PLAYER_1', cards: 'KhQh' }, { name: 'PLAYER_2', cards: 'AsAd' }] },
+        { runPql },
+      );
+      expect(out.heroDraws).toBeUndefined();
+      // No draws probe was issued (no query containing flushDraw).
+      expect(runPql.mock.calls.some((c) => String(c[0]).includes('flushDraw'))).toBe(false);
+    });
+
+    it('does not attach heroDraws when the hero is a range', async () => {
+      const runPql = runPqlWith({ main: { values: { p1: 0.5, p2: 0.5 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: null } });
+      const out = await executeBuildQuery(
+        { game: 'holdem', players: [{ name: 'PLAYER_1', cards: 'QQ+' }, { name: 'PLAYER_2', cards: '25%' }], board: 'Ah7h2c' },
+        { runPql },
+      );
+      expect(out.heroDraws).toBeUndefined();
+    });
+
+    it('best-effort: a failing draws probe still returns the main result', async () => {
+      const main: PQLResult = { values: { p1: 0.7, p2: 0.3 }, columns: ['p1', 'p2'], trials: 100, mode: 'monte_carlo', seed: null };
+      const runPql = vi.fn(async (q: string) => {
+        if (q.includes('flushDraw')) throw new Error('Engine error: boom');
+        return main;
+      });
+      const out = await executeBuildQuery(
+        {
+          game: 'holdem',
+          players: [{ name: 'PLAYER_1', cards: 'KhQh' }, { name: 'PLAYER_2', cards: 'AsAd' }],
+          board: 'Ah7h2c',
+        },
+        { runPql },
+      );
+      expect(out.heroDraws).toBeUndefined();
+      expect(out.result).toBe(main);
+      expect(out.viz.kind).toBe('equity');
+    });
   });
 });
