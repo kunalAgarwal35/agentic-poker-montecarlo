@@ -53,9 +53,10 @@ function verdictFor(pct: number): Verdict {
   return { label: 'Coinflip', color: ACCENTS.coinflip };
 }
 
-// The headline verdict row: only for equity / win-tie-loss with exactly 2 rows
-// (heads-up). Multiway and other viz kinds skip it.
-function VerdictBadge({ viz }: { viz: VizSpec }) {
+// The headline verdict line: only for equity / win-tie-loss with exactly 2 rows
+// (heads-up). Multiway and other viz kinds skip it. Returns null when not
+// applicable so the header can lay out the right-side meta on its own.
+function VerdictLine({ viz }: { viz: VizSpec }) {
   const rowCount =
     viz.kind === 'equity' ? viz.rows.length :
     viz.kind === 'win-tie-loss' ? viz.rows.length : 0;
@@ -65,7 +66,7 @@ function VerdictBadge({ viz }: { viz: VizSpec }) {
   const { name, pct } = head.hero;
   const v = verdictFor(pct);
   return (
-    <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
       <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: v.color }} aria-hidden />
       <span className="font-semibold text-zinc-100">
         {name} {v.label.toLowerCase()}
@@ -73,11 +74,33 @@ function VerdictBadge({ viz }: { viz: VizSpec }) {
       <span className="text-zinc-500">—</span>
       <span className="text-xl font-bold tabular-nums text-zinc-50">{Math.round(pct * 100)}%</span>
       <span
-        className="ml-auto rounded-full px-2 py-0.5 text-xs font-semibold"
+        className="rounded-full px-2 py-0.5 text-xs font-semibold"
         style={{ color: v.color, background: `${v.color}1f`, border: `1px solid ${v.color}55` }}
       >
         {v.label}
       </span>
+    </div>
+  );
+}
+
+// Top header row: verdict on the LEFT, the mode badge stacked above the game
+// chip on the RIGHT, with comfortable spacing via justify-between. This
+// replaces the old absolutely-positioned mode badge + the game chip that used
+// to live inside MatchupHeader, so the three pieces no longer overlap.
+function CardHeader({ viz, game }: { viz: VizSpec; game?: string }) {
+  return (
+    <div className="mb-3 flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <VerdictLine viz={viz} />
+      </div>
+      <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+        <span className="text-[10px] text-zinc-500">{modeBadge(viz)}</span>
+        {game && (
+          <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 text-xs font-medium text-zinc-400">
+            {game}
+          </span>
+        )}
+      </div>
     </div>
   );
 }
@@ -90,13 +113,6 @@ function MatchupHeader({ context, viz }: { context: ResultContext; viz: VizSpec 
   const pctSuffix = viz.kind === 'win-tie-loss' ? ' win' : '';
   return (
     <div className="mb-3 text-xs">
-      {context.game && (
-        <div className="mb-2 flex justify-end">
-          <span className="rounded-full border border-zinc-700 bg-zinc-800 px-2 py-0.5 font-medium text-zinc-400">
-            {context.game}
-          </span>
-        </div>
-      )}
       {hasBoard && (
         <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
           <span className="w-10 shrink-0 uppercase tracking-wide text-zinc-500">Board</span>
@@ -165,9 +181,8 @@ function DrawsPills({ heroDraws }: { heroDraws: HeroDraws }) {
 export function ResultCard({ resolvedQuery, viz, context, heroDraws }: { resolvedQuery: string; viz: VizSpec; context?: ResultContext; heroDraws?: HeroDraws }) {
   const [open, setOpen] = useState(false);
   return (
-    <div className="relative my-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
-      <span className="absolute right-3 top-3 text-[10px] text-zinc-500">{modeBadge(viz)}</span>
-      <VerdictBadge viz={viz} />
+    <div className="my-2 rounded-xl border border-zinc-700 bg-zinc-900 p-4">
+      <CardHeader viz={viz} game={context?.game} />
       {context && <MatchupHeader context={context} viz={viz} />}
       <ResultViz spec={viz} />
       {heroDraws && <DrawsPills heroDraws={heroDraws} />}

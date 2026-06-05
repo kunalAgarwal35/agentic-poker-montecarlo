@@ -67,6 +67,23 @@ describe('ResultCard', () => {
     expect(container.textContent).toContain('omahahi5'); // game chip
   });
 
+  it('shows the game chip exactly once (no duplicate) in the header', () => {
+    const context = { game: 'holdem', board: 'Kh7d2c', players: [
+      { name: 'Hero', cards: 'AsKs' }, { name: 'Villain', cards: 'QdQc' }] };
+    render(<ResultCard resolvedQuery="q" viz={viz} context={context} />);
+    expect(screen.getAllByText('holdem')).toHaveLength(1);
+  });
+
+  it('lays out verdict, mode badge, and game chip together without dropping any', () => {
+    const context = { game: 'holdem', board: 'Kh7d2c', players: [
+      { name: 'Hero', cards: 'AsKs' }, { name: 'Villain', cards: 'QdQc' }] };
+    const { container } = render(<ResultCard resolvedQuery="q" viz={viz} context={context} />);
+    // All three pieces present in the header region.
+    expect(container.textContent).toContain('Hero ahead'); // verdict line
+    expect(container.textContent).toMatch(/Exact · 741 runouts/); // mode badge
+    expect(container.textContent).toContain('holdem'); // game chip
+  });
+
   it('renders no setup header when context is omitted', () => {
     const viz: VizSpec = { kind: 'frequency', mode: 'monte_carlo', trials: 100, label: '≥ flush by the river', pct: 0.5 };
     const { container } = render(<ResultCard resolvedQuery="q" viz={viz} />);

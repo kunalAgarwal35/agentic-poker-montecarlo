@@ -21,4 +21,29 @@ describe('ChatMessage', () => {
     render(<ChatMessage message={message} onChoose={() => {}} />);
     expect(screen.getByText('Which Omaha variant?')).toBeInTheDocument();
   });
+
+  it('renders markdown in an assistant answer (bold headline → <strong>, no literal asterisks)', () => {
+    const message = {
+      id: 'm3',
+      role: 'assistant',
+      parts: [{ type: 'text', text: "**You're behind: ~32%** vs 68%." }],
+    } as unknown as UIMessage;
+    const { container } = render(<ChatMessage message={message} onChoose={() => {}} />);
+    const strong = container.querySelector('strong');
+    expect(strong).not.toBeNull();
+    expect(strong?.textContent).toBe("You're behind: ~32%");
+    // The asterisks must NOT survive as literal text.
+    expect(container.textContent).not.toContain('**');
+  });
+
+  it('keeps USER message text plain (does not strip/parse markdown into elements)', () => {
+    const message = {
+      id: 'm4',
+      role: 'user',
+      parts: [{ type: 'text', text: '**not bold** for me' }],
+    } as unknown as UIMessage;
+    const { container } = render(<ChatMessage message={message} onChoose={() => {}} />);
+    expect(container.querySelector('strong')).toBeNull();
+    expect(container.textContent).toContain('**not bold** for me');
+  });
 });

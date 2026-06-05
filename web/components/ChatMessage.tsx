@@ -2,6 +2,7 @@
 import { useEffect } from 'react';
 import type { UIMessage } from 'ai';
 import { ResultCard } from '@/components/ResultCard';
+import { AnswerMarkdown } from '@/components/AnswerMarkdown';
 import { ChoiceCard } from '@/components/ChoiceCard';
 import { RawResultCard } from '@/components/viz/RawResultCard';
 import { MessageFeedback } from '@/components/MessageFeedback';
@@ -77,7 +78,14 @@ export function ChatMessage({
     <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div className={`max-w-[85%] rounded-2xl px-3 py-2 text-sm ${isUser ? 'bg-blue-600 text-white' : 'bg-zinc-800 text-zinc-100'}`}>
         {message.parts.map((part, i) => {
-          if (part.type === 'text') return <span key={i} className="whitespace-pre-wrap break-words">{part.text}</span>;
+          if (part.type === 'text') {
+            // User text stays plain; assistant text is rendered as markdown so
+            // the bolded headline (and lists/code) display as formatted, not as
+            // literal asterisks.
+            return isUser
+              ? <span key={i} className="whitespace-pre-wrap break-words">{part.text}</span>
+              : <AnswerMarkdown key={i} text={part.text} />;
+          }
           if (part.type === 'tool-build_query' && (part as any).state === 'output-available') {
             const out = (part as any).output as BuildQueryResult;
             return <ResultCard key={i} resolvedQuery={out.resolvedQuery} viz={out.viz} context={out.context} heroDraws={out.heroDraws} />;

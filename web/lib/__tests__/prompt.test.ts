@@ -48,4 +48,7 @@ describe('AGENT_SYSTEM_PROMPT', () => {
     expect(AGENT_SYSTEM_PROMPT).toMatch(/flushOuts/);
     expect(AGENT_SYSTEM_PROMPT).toMatch(/straightOuts/);
   });
+  it('forbids a redundant separate draw/outs query alongside an equity build_query', () => {
+    expect(AGENT_SYSTEM_PROMPT).toMatch(/single query|do not also run a separate/i);
+  });
 });
