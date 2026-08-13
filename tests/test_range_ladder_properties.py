@@ -54,6 +54,14 @@ from range_ladder import compute_range_ladder
 # runouts=300 -- see task-7-report.md for the full sweep, including
 # bucket-5 nuts-air separation of ~1.00 in every trial (well over the 0.4
 # floor) and 6 distinct boundary hands per ladder.
+# Task 11: `hands` x `runouts` (3000 x 300 = 900,000 evaluations under the
+# old grid) collapses to a single `trials` count under joint sampling, where
+# cost is trials x (1 + heroes) -- trials=9000 here evaluates about the same
+# total hand count (9000 x 3 = 27,000) as a single OLD villain's full
+# runout sweep, comfortably enough for these properties (which need
+# discrimination between a provably-1.0 hero and a near-0.0 hero, not
+# fine-grained precision) while running in a small fraction of the old
+# grid's time.
 FLOP = "3s4s5s"
 DEAD = ["6s7s8s2d", "QcJc9d2h"]
 HEROES = [{"id": "nuts", "cards": "6s7s8s2d"}, {"id": "air", "cards": "QcJc9d2h"}]
@@ -61,7 +69,7 @@ HEROES = [{"id": "nuts", "cards": "6s7s8s2d"}, {"id": "air", "cards": "QcJc9d2h"
 
 def _ladder(**kw):
     return compute_range_ladder(board=FLOP, dead=DEAD, heroes=HEROES,
-                                hands=3000, runouts=300, seed=kw.pop("seed", 5), **kw)
+                                trials=9000, seed=kw.pop("seed", 5), **kw)
 
 
 def test_equity_is_monotonic_in_bucket_width():

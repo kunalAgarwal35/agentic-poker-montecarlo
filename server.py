@@ -49,7 +49,7 @@ _warmup_started = False
 def _warmup():
     """Trigger numba JIT compilation in the background so the first real /pql or
     /pql-graph request isn't paying the (~30-90s) compile cost. Also warms the
-    persistent process pool (Task 10) that range_ladder.evaluate_population
+    persistent process pool (Task 10) that range_ladder.evaluate_trials
     parallelises onto, so the first range-ladder request doesn't pay the
     ~5s-per-worker process-creation cost that the pool exists to avoid."""
     try:
