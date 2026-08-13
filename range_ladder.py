@@ -41,27 +41,34 @@ DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
 # where 16 seeds read 38.99pp on the predecessor design) after routing
 # score_hands through fast_score's numba kernel instead of
 # hand_rank_evaluator's pure-numpy _batch_best_score (same math, no
-# (N, C_h*C_b, 5) int32 temporary -- see task-12-brief.md). That is a pure
-# throughput win, so the SAME 2.5s budget now buys ~4.3x more trials before
-# hitting the wall. See bench_range_ladder.py and task-12-report.md for the
-# full sweep table and the numpy-vs-numba speedup measurement.
+# (N, C_h*C_b, 5) int32 temporary -- see task-12-brief.md).
 #
-# T=1500000: PLO6 mean 2.361s, max 2.411s, 0/16 seeds over the 2.5s budget.
-# T=1600000 measured 9/16 seeds OVER budget (max 2.598s) in the same sweep
-# -- the exact tail-latency risk Task 10 flagged, so (as in Task 11) the
-# candidate is the largest one with EVERY seed's wall time under budget,
-# not just the mean.
+# Task 12's FIRST pass picked T=1500000 (largest candidate with 0/16 seeds
+# over the 2.5s budget on the author's box: mean 2.361s, max 2.411s -- only
+# 3.6% headroom). That did NOT survive a loaded machine: re-measured at
+# 3.21-3.44s/board (both 8 and 24 workers) on a busier box -- over budget.
+# Fix round 1 replaced it with the number below, deliberately NOT the
+# largest trials count that fits an idle machine -- chosen for headroom
+# under load instead. Someone re-"optimising" this back up toward the
+# 2.5s ceiling will reproduce the exact regression fix round 1 corrected.
 #
-# Per-bucket spread at T=1500000, 16 seeds (pp = percentage points) -- ALL
-# SIX BUCKETS now reach +/-1pp, including the 15% bucket that was Task 11's
-# holdout (1.42pp there vs 0.47pp here):
-#   bucket   5%: 0.20pp  REACHED
-#   bucket  15%: 0.47pp  REACHED  <- was the binding bucket at T=350000
-#   bucket  25%: 0.28pp  REACHED
-#   bucket  40%: 0.17pp  REACHED
-#   bucket  60%: 0.12pp  REACHED
-#   bucket 100%: 0.07pp  REACHED
-DEFAULT_TRIALS = 1500000
+# T=1000000, 16 seeds: 1.67s/board, worst bucket (15%) 0.76pp -- ~33%
+# time headroom under the 2.5s budget (vs 3.6% at T=1500000). Every
+# bucket stays inside +/-1pp:
+#   bucket   5%: 0.24pp  REACHED
+#   bucket  15%: 0.76pp  REACHED  <- worst bucket, was 1.42pp at Task 11's
+#                                     T=350000, still the binding one here
+#   bucket  25%: 0.45pp  REACHED
+#   bucket  40%: 0.28pp  REACHED
+#   bucket  60%: 0.19pp  REACHED
+#   bucket 100%: 0.11pp  REACHED
+#
+# Cost is trials x (1 + heroes): a multi-hero compute_range_ladder call is
+# proportionally slower than this single-hero benchmark fixture -- e.g. 3
+# heroes at this same T roughly doubles the per-call time the sweep above
+# measured for 1 hero. See bench_range_ladder.py and task-12-report.md
+# (including its fix-round-1 addendum) for the full sweep tables.
+DEFAULT_TRIALS = 1_000_000
 
 # Task 10: worker count for the persistent process pool (see
 # multithread_ploequities3.get_global_executor). Sized to the box's core
