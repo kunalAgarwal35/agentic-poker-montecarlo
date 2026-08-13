@@ -1,7 +1,3 @@
-import numpy as np
-import pytest
-
-from card_encoding import hand_str_to_ints
 from range_ladder import compute_range_ladder
 
 # Fixture deliberately differs from the task-7 brief's literal example
@@ -89,22 +85,70 @@ def test_top_100_percent_equals_equity_versus_a_random_hand():
     assert top100 > {r["bucket"]: r["equity"] for r in air}[100]
 
 
-def test_boundary_strength_falls_as_buckets_widen():
+def test_boundary_hands_are_distinct_across_buckets():
+    # Named for what it actually checks, not for what the brief's original
+    # name ("...strength_falls_as_buckets_widen") promised. The returned
+    # rungs expose each boundary hand's cards/category but not its
+    # `strength` value -- that number lives only inside build_rungs' local
+    # `strength` array and is never returned by compute_range_ladder -- so
+    # there is nothing in the public response to assert non-increasing
+    # strength against without reimplementing (part of) the sampling
+    # pipeline separately from compute_range_ladder and hoping it lines up.
+    # Per review guidance this is the documented fallback: a renamed test
+    # matching its weaker, actually-checked assertion, flagged in
+    # task-7-report.md, rather than inventing a new accessor on
+    # range_ladder.py to satisfy the original name.
     out = _ladder()
     rungs = out["ladders"][0]["rungs"]
     assert len({r["edge"]["cards"] for r in rungs}) > 1
 
 
 def test_ranking_is_hero_independent():
-    """Both heroes must see identical boundary hands -- the whole design rests
-    on the ranking not depending on who is asking."""
+    """Both heroes must see identical boundary hands. This is architecturally
+    guaranteed, not proven here -- build_rungs is called with the same
+    `strength` array for both heroes in this fixture, so equal edges are
+    expected by construction, not evidence of a deeper independence
+    property. It stays as a regression guard: it is the one property in
+    this file that would catch a regression to per-hero ranking (e.g. if
+    compute_range_ladder started sorting by hero_equity instead of the
+    shared `strength`)."""
     out = _ladder()
     edges = [[r["edge"]["cards"] for r in lad["rungs"]] for lad in out["ladders"]]
     assert edges[0] == edges[1]
 
 
 def test_nuts_and_air_are_distinguishable_against_the_tightest_slice():
-    """If this fails the feature is pointless -- see spec section 6."""
+    """If this fails the feature is pointless -- see spec section 6.
+
+    Tightened from the brief's literal `> 0.4` floor: `nuts` is exactly 1.0
+    here by construction (see the fixture comment above), so `> 0.4` reduces
+    to `air[5] < 0.6` and never actually exercises `nuts`'s side of the
+    comparison. Under review's five mutants `air[5]` peaked at 0.507, so the
+    0.4 floor left a 0.49 margin of slack -- loose enough that a broken
+    ranking still cleared it. `air`'s real bucket-5 baseline is exactly 0.0
+    in every seed tried (see task-7-report.md), so a floor of 0.9 (i.e.
+    requiring air[5] < 0.1, a 10x-wider-than-observed tolerance around that
+    true 0.0) leaves ample room for sampling noise while actually failing
+    against the 0.507 mutant.
+    """
     out = _ladder()
     by_id = {l["id"]: {r["bucket"]: r["equity"] for r in l["rungs"]} for l in out["ladders"]}
-    assert by_id["nuts"][5] - by_id["air"][5] > 0.4
+    assert by_id["nuts"][5] - by_id["air"][5] > 0.9
+
+
+def test_bucket_equity_is_per_slice_not_a_repeated_population_wide_number():
+    """Defends against a ladder that ignores bucket slicing entirely and
+    reports the whole-population (bucket-100) equity for every rung -- a
+    mutant that killed none of the other four properties here, because
+    `nuts` is 1.0 at every bucket (by construction of this fixture) whether
+    or not slicing works at all, and the hero-independence/discrimination/
+    boundary-distinctness checks don't look at how `equity` changes across
+    buckets for a single hero. `air`'s tightest-slice equity (0.0, see the
+    fixture comment above) versus its whole-population equity (~0.12-0.16
+    across seeds, always > 0.12) is the one place in this file that number
+    actually has to move. Margin (0.05, well under the observed ~0.12
+    minimum) is there so ordinary sampling noise can't flip this by luck.
+    """
+    out = _ladder()
+    by_id = {l["id"]: {r["bucket"]: r["equity"] for r in l["rungs"]} for l in out["ladders"]}
+    assert by_id["air"][100] - by_id["air"][5] > 0.05
