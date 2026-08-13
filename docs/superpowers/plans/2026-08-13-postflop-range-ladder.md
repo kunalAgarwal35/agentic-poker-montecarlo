@@ -661,15 +661,17 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     r = 1 if board_len == 5 else (runouts if runouts else 800)
     runout_rows = sample_runouts(deck, board_len, r, rng)
 
-    strength, hero_equity = evaluate_population(
+    strength, hero_equity, counts = evaluate_population(
         villains, hero_arrays, board_ints, runout_rows, game, score_array
     )
 
-    # A villain eligible on zero runouts carries no data; drop it rather than
-    # letting a 0.0 masquerade as "weakest hand in the population".
-    seen = np.zeros(villains.shape[0], dtype=bool)
-    for runout in runout_rows:
-        seen |= eligible_mask(villains, runout)
+    # A villain that contributed to no runout carries no data; drop it rather
+    # than letting a structural 0.0 masquerade as "weakest hand in the
+    # population". Filter on `counts` — the contribution count evaluate_population
+    # actually used — NOT on a recomputed eligible_mask union. The two differ on
+    # runouts skipped by the <2-eligible guard, and that gap is exactly how an
+    # artefact reaches the user as a boundary hand.
+    seen = counts > 0
     villains, strength, hero_equity = villains[seen], strength[seen], hero_equity[:, seen]
 
     ladders = []
