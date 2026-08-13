@@ -195,8 +195,35 @@ def describe_category(hand_ints, board5):
     return _CATEGORY_LABELS[CATEGORY_TOKENS[int(idx)]]
 
 
-def build_rungs(strength, hero_equity_row, villains, buckets, board5_for_category):
-    """One rung per bucket: hero equity vs that slice + the slice's weakest hand."""
+def _compatible_board5(board_ints, runout_rows, hand):
+    """Board built from `board_ints` + the first sampled runout `hand` is
+    eligible for (no shared card), or None if every sampled runout collides.
+
+    describe_category feeds `hand` + this board straight into a
+    bounds-unchecked numba kernel; a runout sharing a card with `hand`
+    produces a 9-card set with a duplicate, which crashes the process
+    (access violation), not a Python exception. Reuses `eligible_mask` --
+    the same collision check evaluate_population uses for scoring -- rather
+    than re-deriving it, just applied to a single hand instead of the whole
+    villain population.
+    """
+    hand2d = hand[None, :]
+    for runout in runout_rows:
+        if eligible_mask(hand2d, runout)[0]:
+            return np.concatenate([board_ints, runout]).astype(np.int32)
+    return None
+
+
+def build_rungs(strength, hero_equity_row, villains, buckets, board_ints, runout_rows):
+    """One rung per bucket: hero equity vs that slice + the slice's weakest hand.
+
+    Each boundary hand is labelled on one sampled runout it is actually
+    compatible with (see `_compatible_board5`), not a single runout shared
+    across every bucket -- a shared runout can hold a card the boundary
+    hand also holds, which is an impossible 9-card set for describe_category
+    to score. On the river, `runout_rows` is the single empty completion, so
+    every hand is trivially compatible with it and this is a no-op.
+    """
     order = np.argsort(-strength, kind="stable")     # strongest first
     n = order.size
     rungs = []
@@ -204,12 +231,18 @@ def build_rungs(strength, hero_equity_row, villains, buckets, board5_for_categor
         take = max(1, int(round(n * pct / 100.0)))
         sl = order[:take]
         edge_idx = int(sl[-1])                        # weakest hand in the slice
+        hand = villains[edge_idx]
+        board5 = _compatible_board5(board_ints, runout_rows, hand)
+        # Essentially impossible with any real sample size, but never
+        # assumed: an empty label is a cosmetic gap, a duplicate card fed
+        # to the numba kernel is a process crash.
+        category = describe_category(hand, board5) if board5 is not None else ""
         rungs.append({
             "bucket": pct,
             "equity": float(hero_equity_row[sl].mean()),
             "edge": {
-                "cards": ints_to_hand_str(villains[edge_idx]),
-                "category": describe_category(villains[edge_idx], board5_for_category),
+                "cards": ints_to_hand_str(hand),
+                "category": category,
             },
         })
     return rungs
@@ -310,18 +343,20 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     seen = counts > 0
     villains, strength, hero_equity = villains[seen], strength[seen], hero_equity[:, seen]
 
-    # Category labels are read off the first sampled runout (runout_rows[0])
-    # so a flop/turn board still names a complete 5-card hand; on the river
-    # runout_rows[0] IS the real board (the only, empty-completion, row).
-    # Loop-invariant across heroes, so it's computed once here rather than
-    # inside the per-hero loop below.
-    board5 = np.concatenate([board_ints, runout_rows[0]]).astype(np.int32)
-
     ladders = []
     for j, hero in enumerate(heroes):
+        # Each bucket's boundary hand is labelled on one sampled runout that
+        # *that hand* is compatible with (build_rungs / _compatible_board5),
+        # not a single runout shared across every bucket and every hero --
+        # a shared runout can hold a card the boundary hand also holds,
+        # which is an impossible duplicate-card board for describe_category
+        # to score. On the river, runout_rows is the single empty
+        # completion, so every hand is trivially compatible and this is
+        # unchanged from before.
         ladders.append({
             "id": hero["id"],
-            "rungs": build_rungs(strength, hero_equity[j], villains, list(buckets), board5),
+            "rungs": build_rungs(strength, hero_equity[j], villains, list(buckets),
+                                 board_ints, runout_rows),
         })
 
     return {

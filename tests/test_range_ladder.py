@@ -146,6 +146,13 @@ def test_a_villain_holding_a_runout_card_is_skipped_not_scored():
     assert strength[1] == 1.0            # beats villain 2 outright
     assert hero_equity[0, 1] == 1.0      # hero also beats villain 1
 
+# A single empty runout -- the same shape sample_runouts returns on the
+# river, where board_ints already has all 5 cards and no completion is
+# needed. Every hand is trivially "compatible" with an empty runout, so
+# this reproduces build_rungs' pre-Task-7 behavior for these two tests,
+# which only care about bucket slicing, not runout selection.
+RIVER_RUNOUTS = np.empty((1, 0), dtype=np.int32)
+
 def test_rungs_slice_by_strength_and_report_the_weakest_hand_in_each():
     # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half,
     # so index i (strength 0.1*i) has hero equity 1.0 for i < 5 and 0.0 above.
@@ -154,7 +161,7 @@ def test_rungs_slice_by_strength_and_report_the_weakest_hand_in_each():
     hero = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=np.float64)
 
     rungs = build_rungs(strength, hero, villains, [20, 50, 100],
-                        hand_str_to_ints("6s7s4s2h9d"))
+                        hand_str_to_ints("6s7s4s2h9d"), RIVER_RUNOUTS)
 
     assert [r["bucket"] for r in rungs] == [20, 50, 100]
     # top 20% = the 2 strongest, which hero loses to
@@ -170,7 +177,7 @@ def test_every_bucket_holds_at_least_one_hand():
     strength = np.array([0.1, 0.5, 0.9])
     hero = np.array([1.0, 1.0, 0.0])
     rungs = build_rungs(strength, hero, villains, [5, 100],
-                        hand_str_to_ints("6s7s4s2h9d"))
+                        hand_str_to_ints("6s7s4s2h9d"), RIVER_RUNOUTS)
     assert rungs[0]["equity"] == 0.0        # top 5% rounds up to 1 hand
     assert rungs[0]["edge"]["cards"] != ""
 
@@ -323,6 +330,47 @@ def test_zero_runouts_on_river_is_a_noop():
     )
     assert out["exact"] is True
     assert out["runouts"] == 0
+
+
+_NINE_CATEGORIES = {
+    "high card", "pair", "two pair", "trips", "straight",
+    "flush", "full house", "quads", "straight flush",
+}
+
+
+def test_boundary_hand_colliding_with_the_first_runout_does_not_crash():
+    # Regression pin for a Task-7 finding: build_rungs used to label every
+    # bucket's boundary hand on the SAME precomputed board (board_ints +
+    # runout_rows[0]). Nothing checked that a given boundary hand was
+    # actually eligible for that particular runout -- when it held a card
+    # the runout also used, describe_category fed a 9-card set containing a
+    # duplicate card straight into optimized_evaluator's bounds-unchecked
+    # numba kernel, which does not raise a Python exception; it segfaults
+    # the process (Windows: "access violation").
+    #
+    # This exact board/dead/seed/hands/runouts combination was confirmed
+    # (by direct inspection, independent of compute_range_ladder) to have
+    # runout_rows[0] == cards [42, 7] ("Qd3c"), which collides with the
+    # bucket-25, bucket-40 and bucket-100 boundary hands -- 3 of 6 buckets.
+    # Pre-fix this reproduces a hard crash, not a raised exception, so
+    # there is nothing to pytest.raises() around: the assertion that
+    # matters is simply that this call returns at all.
+    out = compute_range_ladder(
+        board="6s7s4s",
+        dead=["AsKs9h2c", "QhJhTd3d"],
+        heroes=[{"id": "nuts", "cards": "AsKs9h2c"},
+                {"id": "air", "cards": "QhJhTd3d"}],
+        hands=400, runouts=40, seed=5,
+    )
+    assert len(out["ladders"]) == 2
+    for lad in out["ladders"]:
+        assert len(lad["rungs"]) == 6
+        for rung in lad["rungs"]:
+            category = rung["edge"]["category"]
+            # Either a real label, or the documented "no compatible runout
+            # among those sampled" fallback -- never anything else, and
+            # never a crash.
+            assert category in _NINE_CATEGORIES or category == ""
 
 
 def test_describe_category_names_a_flush():
