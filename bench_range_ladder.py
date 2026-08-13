@@ -1,10 +1,25 @@
-"""Task 11 re-measurement: joint trial sampling replaced the N (hands) x R
-(runouts) grid entirely, so there is exactly one knob left to sweep --
-`trials`. Cost is trials x (1 + heroes) hand-evaluations, not
-hands x runouts x (1 + heroes), so this sweep runs at a small fraction of
-the wall-clock the old N x R grid needed for the same trial count. See
-range_ladder.py's DEFAULT_TRIALS comment and task-11-report.md for the
-numbers this produced and how they were chosen.
+"""Task 11 re-measurement (superseded by Task 12 below): joint trial
+sampling replaced the N (hands) x R (runouts) grid entirely, so there is
+exactly one knob left to sweep -- `trials`. Cost is trials x (1 + heroes)
+hand-evaluations, not hands x runouts x (1 + heroes), so this sweep runs at
+a small fraction of the wall-clock the old N x R grid needed for the same
+trial count. See range_ladder.py's DEFAULT_TRIALS comment and
+task-11-report.md for the numbers Task 11 produced and how they were
+chosen.
+
+Task 12: `score_hands` now routes through fast_score's numba kernel by
+default instead of hand_rank_evaluator's pure-numpy `_batch_best_score`
+(same math, no (N, C_h*C_b, 5) int32 temporary -- see task-12-brief.md).
+That is a straight throughput win with no accuracy-model change, so the
+2.5s budget buys many more trials than Task 11's numpy-path sweep could
+reach: measured serial PLO6 speedup at Task 11's old DEFAULT_TRIALS
+(350000) is ~4.1x (9.53s numpy vs 2.33s numba); parallel (24-worker pool)
+is ~3.5x (2.17s numpy vs 0.62s numba) -- see task-12-report.md for the full
+methodology. CANDIDATES below is re-bracketed around the NEW ~2.5s
+boundary (found via a single-seed timing probe before this file was
+finalized, not reproduced here): the old 10k-400k grid is retired since
+every one of those candidates now finishes in well under a second and
+carries no information about where the budget boundary actually sits.
 
 MUST run under `if __name__ == "__main__":` (see bottom of this file), not
 as bare module-level code: ProcessPoolExecutor uses Windows' spawn start
@@ -23,17 +38,13 @@ Scope trimmed to fit comfortably inside a ~25 minute run:
     comfortably ahead at the chosen `trials`, so a second full accuracy
     sweep for PLO4 was skipped.
   - The candidate grid is a hand-picked set bracketing the 2.5s boundary
-    (found via a separate interactive probe, not reproduced here) plus a
-    few points well past it, included ONLY to answer "what T would close
-    the +/-1pp gap" empirically rather than by extrapolation -- Task 11's
-    per-trial cost is cheap enough that measuring those over-budget points
-    directly is itself cheap, even though using them in production would
-    not be.
+    plus Task 11's old default (350000) as a before/after reference point.
 """
 import time
 
 import numpy as np
 
+import fast_score
 from range_ladder import compute_range_ladder, warmup_pool, DEFAULT_POOL_WORKERS
 
 PLO6_DEAD = ["AsKs9h2c3d4d", "QhJhTd3s5s8s"]
@@ -51,14 +62,12 @@ BUDGET_S = 2.5
 # contiguous run of 16, in case of any seed-adjacency correlation.
 SPREAD_SEEDS = tuple(range(1, 9)) + tuple(range(21, 29))
 
-# Brackets the ~2.5s boundary (found via a separate interactive timing probe
-# before this file was finalized -- see task-11-report.md for that probe's
-# output): 300k-400k is the bracket, budget wins inside it. The candidates
-# past 400k are ONLY here to measure how much larger T needs to get before
-# every bucket's spread falls under +/-1pp -- they are known in advance to
-# be over budget and are never candidates for DEFAULT_TRIALS.
-CANDIDATES = [10000, 50000, 100000, 200000, 300000, 350000, 400000]
-OVER_BUDGET_PROBES = [700000, 1400000, 2800000]
+# Task 12: re-bracketed around the numba-kernel-era ~2.5s boundary (a
+# single-seed probe put it between 1.5M and 1.7M trials -- see
+# task-12-report.md). 350000 is kept as Task 11's old default, now nowhere
+# near the boundary, so the sweep table below shows the "before" point too.
+CANDIDATES = [350000, 1000000, 1300000, 1500000, 1600000, 1700000]
+OVER_BUDGET_PROBES = [2000000, 3000000]
 
 
 def _warm():
@@ -67,6 +76,39 @@ def _warm():
     # doesn't land on whichever timed call happens to run first.
     compute_range_ladder(board=BOARD, dead=PLO6_DEAD, heroes=PLO6_HEROES,
                          trials=200, seed=0)
+
+
+def measure_speedup():
+    """Task 12's headline number: numpy reference path vs the numba kernel,
+    at Task 11's old DEFAULT_TRIALS (350000), PLO6. Forces `parallel=False`
+    (single-process) for both arms -- ProcessPoolExecutor workers are
+    separate processes that read fast_score.USE_NUMBA_SCORE (and the
+    RANGE_LADDER_USE_NUMBA env var) independently at their own import time,
+    so flipping the flag in THIS process would silently have no effect on
+    what a parallel call actually runs in the pool. Also separates first
+    call (pays numba's JIT-or-cache-load cost) from steady state (later
+    calls in the same already-warmed process)."""
+    print("\n=== Task 12 speedup: numpy vs numba (PLO6, serial, trials=350000) ===")
+    original = fast_score.USE_NUMBA_SCORE
+    try:
+        for label, use_numba in (("numba", True), ("numpy", False)):
+            fast_score.USE_NUMBA_SCORE = use_numba
+            t0 = time.perf_counter()
+            compute_range_ladder(board=BOARD, dead=PLO6_DEAD, heroes=PLO6_HEROES,
+                                 trials=350000, seed=0, parallel=False)
+            first_call = time.perf_counter() - t0
+
+            times = []
+            for seed in range(1, 4):
+                t0 = time.perf_counter()
+                compute_range_ladder(board=BOARD, dead=PLO6_DEAD, heroes=PLO6_HEROES,
+                                     trials=350000, seed=seed, parallel=False)
+                times.append(time.perf_counter() - t0)
+            steady_mean = sum(times) / len(times)
+            print(f"  {label:6}: first_call={first_call:6.3f}s  "
+                 f"steady_state_mean={steady_mean:6.3f}s  (n=3: {[round(t, 3) for t in times]})")
+    finally:
+        fast_score.USE_NUMBA_SCORE = original
 
 
 def measure_scaling():
@@ -149,17 +191,20 @@ def sweep_accuracy():
     under_budget = [row for row in results if row[2] <= BUDGET_S]
     if not under_budget:
         print("\nNo candidate stayed under budget across every seed -- widen CANDIDATES.")
-        return results, buckets
+        return results, buckets, None
 
     chosen = max(under_budget, key=lambda row: row[0])
     t, mean_t, max_t, spread_pp, over = chosen
     print(f"\nChosen: trials={t} (mean {mean_t:.3f}s, max {max_t:.3f}s, "
          f"0/{len(SPREAD_SEEDS)} over {BUDGET_S}s budget)")
     print("Per-bucket +/-1pp verdict:")
+    all_reached = True
     for b, sp in zip(buckets, spread_pp):
         verdict = "REACHED" if sp <= 1.0 else "NOT reached"
+        all_reached &= sp <= 1.0
         print(f"  bucket {b:>4}%: spread {sp:5.2f}pp -- {verdict}")
-    return results, buckets
+    print(f"Every bucket inside +/-1pp: {all_reached}")
+    return results, buckets, t
 
 
 def probe_gap_to_one_pp(buckets):
@@ -195,8 +240,12 @@ def check_plo4_stays_ahead(t):
 
 if __name__ == "__main__":
     _warm()
+    measure_speedup()
     measure_scaling()
-    probe_budget_boundary()
-    _results, _buckets = sweep_accuracy()
-    probe_gap_to_one_pp(_buckets)
-    check_plo4_stays_ahead(350000)
+    _results, _buckets, _chosen_t = sweep_accuracy()
+    if _chosen_t is not None:
+        already_all_reached = all(sp <= 1.0 for row in _results if row[0] == _chosen_t
+                                  for sp in row[3])
+        if not already_all_reached:
+            probe_gap_to_one_pp(_buckets)
+        check_plo4_stays_ahead(_chosen_t)

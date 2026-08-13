@@ -16,6 +16,7 @@ import threading
 import traceback
 import logging
 
+import fast_score
 from pql import run_pql
 from pql.graphs import equity_by_street, equity_distribution, equity_vs_class
 from pql.scenario import build_scenario
@@ -51,7 +52,12 @@ def _warmup():
     /pql-graph request isn't paying the (~30-90s) compile cost. Also warms the
     persistent process pool (Task 10) that range_ladder.evaluate_trials
     parallelises onto, so the first range-ladder request doesn't pay the
-    ~5s-per-worker process-creation cost that the pool exists to avoid."""
+    ~5s-per-worker process-creation cost that the pool exists to avoid.
+
+    Task 12: also warms fast_score's numba scoring kernel directly, in THIS
+    process, as its own try/except -- independent of warmup_pool() below
+    (which also warms it, inside every pool worker) so a pool-warmup failure
+    doesn't silently skip warming the serial/in-process scoring path too."""
     try:
         run_pql(
             "select avg(riverEquity(PLAYER_1)) as e from game='holdem', "
@@ -60,6 +66,11 @@ def _warmup():
         )
     except Exception as e:  # never let warmup crash the process
         app.logger.warning(f"[Warmup] failed: {e}")
+
+    try:
+        fast_score.warmup()
+    except Exception as e:  # never let warmup crash the process
+        app.logger.warning(f"[Warmup] fast_score kernel warmup failed: {e}")
 
     try:
         warmup_pool()

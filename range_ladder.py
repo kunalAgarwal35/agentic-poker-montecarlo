@@ -19,51 +19,49 @@ from itertools import combinations
 
 import numpy as np
 
+import fast_score
 from card_encoding import generate_deck_ints, hand_str_to_ints, ints_to_hand_str
+from fast_score import batch_best_score
 from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
 from hand_rank_evaluator import (
     _BOARD_COMBOS,
     _HAND_COMBOS,
-    _batch_best_score,
     detect_game_type,
     get_score_array,
 )
-from multithread_ploequities3 import _dummy_warmup_task, get_global_executor
+from multithread_ploequities3 import get_global_executor
 from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
 
-# Task 11: chosen by sweeping `trials` for PLO6 (the binding case for TIME,
-# same as every prior task) against the 2.5s budget on the persistent
-# process pool, then measuring run-to-run spread (max equity spread across
-# seeds, per bucket) at 16 seeds -- the brief's minimum, after this same
-# project already saw an 8-seed estimate read 11.12pp where 16 seeds read
-# 38.99pp on the predecessor design. See bench_range_ladder.py and
-# task-11-report.md for the full sweep table.
+# Task 11 chose T=350000 this way; Task 12 re-ran the identical sweep
+# methodology (PLO6, the binding case for TIME; 16 seeds -- the brief's
+# minimum, after this project already saw an 8-seed estimate read 11.12pp
+# where 16 seeds read 38.99pp on the predecessor design) after routing
+# score_hands through fast_score's numba kernel instead of
+# hand_rank_evaluator's pure-numpy _batch_best_score (same math, no
+# (N, C_h*C_b, 5) int32 temporary -- see task-12-brief.md). That is a pure
+# throughput win, so the SAME 2.5s budget now buys ~4.3x more trials before
+# hitting the wall. See bench_range_ladder.py and task-12-report.md for the
+# full sweep table and the numpy-vs-numba speedup measurement.
 #
-# T=350000: PLO6 mean 2.09s, max 2.13s, 0/16 seeds over the 2.5s budget.
-# T=400000 measured 2/16 seeds OVER budget (max 2.58s) in the same sweep --
-# the exact tail-latency risk Task 10 flagged, so the naive "largest mean
-# under budget" candidate was rejected in favor of one with real margin.
+# T=1500000: PLO6 mean 2.361s, max 2.411s, 0/16 seeds over the 2.5s budget.
+# T=1600000 measured 9/16 seeds OVER budget (max 2.598s) in the same sweep
+# -- the exact tail-latency risk Task 10 flagged, so (as in Task 11) the
+# candidate is the largest one with EVERY seed's wall time under budget,
+# not just the mean.
 #
-# Per-bucket spread at T=350000, 16 seeds (pp = percentage points):
-#   bucket   5%: 0.42pp  REACHED (+/-1pp)
-#   bucket  15%: 1.42pp  NOT reached  <- the actual binding bucket, not the
-#                                          brief's expected top-5% bucket
-#                                          (see task-11-report.md for why:
-#                                          this fixture's hero equity sits
-#                                          near 0.5 in that slice, which
-#                                          maximizes binomial variance,
-#                                          regardless of the slice's larger
-#                                          sample count)
-#   bucket  25%: 0.85pp  REACHED
-#   bucket  40%: 0.53pp  REACHED
-#   bucket  60%: 0.35pp  REACHED
-#   bucket 100%: 0.21pp  REACHED
-# Closing bucket 15% to +/-1pp needs roughly T=700000 (measured 0.68pp
-# there) -- about 4.4s/call, ~1.9s over the 2.5s budget. Does NOT fit.
-DEFAULT_TRIALS = 350000
+# Per-bucket spread at T=1500000, 16 seeds (pp = percentage points) -- ALL
+# SIX BUCKETS now reach +/-1pp, including the 15% bucket that was Task 11's
+# holdout (1.42pp there vs 0.47pp here):
+#   bucket   5%: 0.20pp  REACHED
+#   bucket  15%: 0.47pp  REACHED  <- was the binding bucket at T=350000
+#   bucket  25%: 0.28pp  REACHED
+#   bucket  40%: 0.17pp  REACHED
+#   bucket  60%: 0.12pp  REACHED
+#   bucket 100%: 0.07pp  REACHED
+DEFAULT_TRIALS = 1500000
 
 # Task 10: worker count for the persistent process pool (see
 # multithread_ploequities3.get_global_executor). Sized to the box's core
@@ -103,24 +101,49 @@ _CATEGORY_LABELS = {
 }
 
 
+def _pool_worker_warmup_task():
+    """Module-level (Windows-spawn-picklable, same rationale as
+    `_evaluate_trials_chunk_worker`) warmup task run inside EVERY persistent
+    pool worker process: forces the worker to spawn (same role the old
+    `_dummy_warmup_task` no-op played) and, via fast_score.warmup(), triggers
+    that worker's own numba JIT (or, with cache=True and the disk cache
+    already populated by whichever process warmed first, a cache load
+    instead of a fresh compile -- see task-12-report.md for the measurement
+    confirming this actually happens rather than being assumed).
+
+    Real evaluate_trials chunks land on these SAME worker processes, so
+    warming only the main process (as fast_score.warmup() called directly
+    would) leaves every worker's first real chunk paying a compile-or-
+    cache-load stall the first time score_hands' numba path executes there.
+    """
+    fast_score.warmup()
+    return 1
+
+
 def warmup_pool():
     """Spawn and warm every worker of the persistent process pool, sized to
     DEFAULT_POOL_WORKERS, so the first real range-ladder request doesn't pay
     process-creation cost. Meant to be called once, from server.py's
     existing background warmup thread.
 
+    Also warms fast_score's numba kernel in THIS (main) process first --
+    compute_range_ladder's serial path (small `trials`, or `parallel=False`)
+    runs score_hands in-process, never touching the pool -- and then in
+    every pool worker via `_pool_worker_warmup_task`, so both the serial and
+    parallel code paths are covered.
+
     Deliberately does NOT call multithread_ploequities3.warmup_executor():
     that function hardcodes _DEFAULT_WORKERS (4 -- sized for a different,
     lighter-weight caller, see the DEFAULT_POOL_WORKERS comment above) for
-    both pool creation *and* for how many dummy tasks it submits, so it
+    both pool creation *and* for how many warmup tasks it submits, so it
     would warm only 4 of this box's cores even if the pool were already
     sized larger. This calls the same underlying interface
-    (get_global_executor, the same _dummy_warmup_task used elsewhere) at
-    DEFAULT_POOL_WORKERS instead -- still the one persistent pool, not a
-    second one.
+    (get_global_executor) at DEFAULT_POOL_WORKERS instead -- still the one
+    persistent pool, not a second one.
     """
+    fast_score.warmup()
     executor = get_global_executor(DEFAULT_POOL_WORKERS)
-    futures = [executor.submit(_dummy_warmup_task) for _ in range(DEFAULT_POOL_WORKERS)]
+    futures = [executor.submit(_pool_worker_warmup_task) for _ in range(DEFAULT_POOL_WORKERS)]
     for f in futures:
         f.result()
 
@@ -196,7 +219,7 @@ def sample_trials(deck, hole_count, board_len, trials, rng):
     return deck[draw].astype(np.int32)
 
 
-def score_hands(hands, board5, game, score_array, chunk=2000):
+def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
     """Best 5-card score for each hand. Higher = better.
 
     `board5` is either a single board shared by every hand, shape (5,), or
@@ -204,6 +227,15 @@ def score_hands(hands, board5, game, score_array, chunk=2000):
     `evaluate_trials` needs: every trial completes the board with its own
     runout, so hand i must be scored against board5[i], not one board
     shared across the whole call.
+
+    Task 12: the actual per-chunk scoring is `fast_score.batch_best_score`,
+    a numba kernel that does the same work as the numpy reference path
+    (`hand_rank_evaluator._batch_best_score`) with none of its (N, C_h*C_b,
+    5) temporaries. `use_numba` passes straight through to that dispatcher
+    (None -> module-level default, True/False -> force a path) -- exposed
+    here, not just in fast_score, so tests/test_fast_score.py can force
+    either path through the SAME call site range_ladder actually uses,
+    rather than only at the raw kernel level.
     """
     hand_combos = _HAND_COMBOS[game]
     n = hands.shape[0]
@@ -216,8 +248,9 @@ def score_hands(hands, board5, game, score_array, chunk=2000):
             boards = np.ascontiguousarray(board5[start:start + chunk])
         else:
             boards = np.ascontiguousarray(np.broadcast_to(board5, (block.shape[0], 5)))
-        out[start:start + chunk] = _batch_best_score(
+        out[start:start + chunk] = batch_best_score(
             block, boards, hand_combos, _BOARD_COMBOS, score_array, BINOMIAL,
+            use_numba=use_numba,
         )
     return out
 
