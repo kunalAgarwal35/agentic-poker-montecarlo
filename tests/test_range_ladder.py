@@ -3,7 +3,13 @@ from itertools import combinations
 import numpy as np
 from card_encoding import hand_str_to_ints, generate_deck_ints
 from hand_rank_evaluator import get_score_array
-from range_ladder import sample_villains, sample_runouts, eligible_mask, score_hands
+from range_ladder import (
+    sample_villains,
+    sample_runouts,
+    eligible_mask,
+    score_hands,
+    evaluate_population,
+)
 
 def test_sample_villains_returns_distinct_legal_hands():
     deck = np.arange(20, 52, dtype=np.int32)      # 32 cards available
@@ -89,3 +95,36 @@ def test_score_hands_chunking_matches_unchunked():
     a = score_hands(hands, board5, "plo4", sa, chunk=10_000)
     b = score_hands(hands, board5, "plo4", sa, chunk=7)
     assert np.array_equal(a, b)
+
+def test_strength_orders_a_made_flush_above_air_on_the_river():
+    board = hand_str_to_ints("6s7s4s2h9d")          # river: exact, no sampling
+    villains = np.stack([
+        hand_str_to_ints("AsKs9h2c"),               # nut flush
+        hand_str_to_ints("Jd3d2d4d"),               # air
+        hand_str_to_ints("6h6d3c5d"),               # pair
+    ])
+    heroes = np.stack([hand_str_to_ints("QsJs8c3h")])   # queen-high flush
+    runouts = np.empty((1, 0), dtype=np.int32)
+    strength, hero_equity = evaluate_population(
+        villains, heroes, board, runouts, "plo4", get_score_array()
+    )
+    assert strength[0] > strength[2] > strength[1]
+    assert hero_equity.shape == (1, 3)
+    assert hero_equity[0, 0] == 0.0      # loses to the nut flush
+    assert hero_equity[0, 1] == 1.0      # beats air
+
+def test_a_villain_holding_a_runout_card_is_skipped_not_scored():
+    # Board 6s7s4s; the only runout is 2h9d. Villain 0 holds 2h, so the pairing
+    # is impossible -- it must be skipped, not counted as a loss.
+    board = hand_str_to_ints("6s7s4s")
+    villains = np.stack([
+        hand_str_to_ints("As2hKd3c"),
+        hand_str_to_ints("AhKh9c8c"),
+    ])
+    heroes = np.stack([hand_str_to_ints("QsJs8d3d")])
+    runouts = np.stack([hand_str_to_ints("2h9d")])
+    strength, hero_equity = evaluate_population(
+        villains, heroes, board, runouts, "plo4", get_score_array()
+    )
+    assert strength[0] == 0.0            # never eligible -> no data
+    assert hero_equity[0, 0] == 0.0

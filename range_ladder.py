@@ -86,3 +86,43 @@ def score_hands(hands, board5, game, score_array, chunk=2000):
             hand_combos, _BOARD_COMBOS, score_array, BINOMIAL,
         )
     return out
+
+
+def evaluate_population(villains, heroes, board_ints, runouts, game, score_array):
+    """The single O((N + H) x R) pass. Returns (strength, hero_equity)."""
+    n = villains.shape[0]
+    h = heroes.shape[0]
+
+    beat_sum = np.zeros(n, dtype=np.float64)     # share of field beaten, summed
+    beat_cnt = np.zeros(n, dtype=np.float64)     # runouts this villain was eligible for
+    hero_sum = np.zeros((h, n), dtype=np.float64)
+
+    for runout in runouts:
+        board5 = np.concatenate([board_ints, runout]).astype(np.int32)
+        mask = eligible_mask(villains, runout)
+        idx = np.flatnonzero(mask)
+        if idx.size < 2:
+            continue
+
+        vs = score_hands(villains[idx], board5, game, score_array)
+        hs = score_hands(heroes, board5, game, score_array)
+
+        # Share of the eligible field each villain beats: win + 1/2 tie.
+        order = np.sort(vs)
+        lower = np.searchsorted(order, vs, side="left")          # strictly worse
+        upper = np.searchsorted(order, vs, side="right")
+        ties = upper - lower - 1                                  # excluding self
+        share = (lower + 0.5 * ties) / (idx.size - 1)
+        beat_sum[idx] += share
+        beat_cnt[idx] += 1.0
+
+        # Hero vs each eligible villain, heads-up.
+        for j in range(h):
+            hero_sum[j, idx] += np.where(hs[j] > vs, 1.0, np.where(hs[j] == vs, 0.5, 0.0))
+
+    seen = beat_cnt > 0
+    strength = np.zeros(n, dtype=np.float64)
+    strength[seen] = beat_sum[seen] / beat_cnt[seen]
+    hero_equity = np.zeros((h, n), dtype=np.float64)
+    hero_equity[:, seen] = hero_sum[:, seen] / beat_cnt[seen]
+    return strength, hero_equity
