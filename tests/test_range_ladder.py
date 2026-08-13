@@ -177,33 +177,57 @@ def test_every_bucket_holds_at_least_one_hand():
 
 def test_river_ladder_is_exact_and_monotonic():
     # Board/hero fixture deliberately differs from the task-6 brief's literal
-    # example (board="6s7s4s2h9d", air="QsJs8c3h"). Verified by direct
-    # computation: that board's 3 spades (4,6,7) are close enough together
-    # that TWO straight-flush windows exist (3-4-5-6-7 and 4-5-6-7-8), both
-    # sharing card 5s, which makes straight flushes ~1.6% of the hand space
-    # instead of the ~0.1% a single window would give -- enough of them
-    # land in the top-5% bucket (about 30/100) that they dominate it. Worse,
-    # the brief's dead cards (AsKs + QsJs) remove all four spade
-    # honor-cards, so *every* ordinary villain flush is capped below Ten
-    # kicker -- meaning both "nuts" (A-K flush) and "air" (Q-J flush, not
-    # actually air: see test_score_hands_ranks_a_flush_above_a_pair's
-    # comment on this same string) are equally invincible against every
-    # non-straight-flush villain and equally beaten by every straight
-    # flush. Their top-5% equities come out identically 0.70 -- provably,
-    # for any seed/hand count, not just this one -- so nuts > 0.85 and
-    # air < 0.15 can never both hold. Confirmed via score_hands() directly:
-    # nuts=10000015.38, air=10000013.18, both dwarfed by straight-flush
-    # scores ~1e10, and nuts > air > every reachable ordinary-flush score.
-    # This fixture keeps the same intent (river-exact, monotonic, hero
-    # differentiation, hero-independent boundary hands) with a board whose
-    # 3 flush-suit cards (2s/8s/Ks) are too spread out for any straight
-    # flush to exist, and an "air" hand that is genuinely disconnected
-    # (no pair, no flush draw) rather than a second flush.
+    # example (board="6s7s4s2h9d", dead=["AsKs9h2c", "QsJs8c3h"]). Verified
+    # by direct computation: that board's 3 spades (4,6,7) are close enough
+    # together that TWO straight-flush windows exist (3-4-5-6-7 and
+    # 4-5-6-7-8), both sharing card 5s, which makes straight flushes ~1.6%
+    # of the hand space instead of the ~0.1% a single window would give --
+    # enough of them land in the top-5% bucket (about 30/100) that they
+    # dominate it. Worse, the brief's dead cards (AsKs + QsJs) remove all
+    # four spade honor-cards, so *every* ordinary villain flush is capped
+    # below Ten kicker -- meaning both "nuts" (A-K flush) and "air" (Q-J
+    # flush, not actually air: see
+    # test_score_hands_ranks_a_flush_above_a_pair's comment on this same
+    # string) are equally invincible against every non-straight-flush
+    # villain and equally beaten by every straight flush. Their top-5%
+    # equities come out identically 0.70 -- provably, for any seed/hand
+    # count, not just this one -- so nuts > 0.85 and air < 0.15 can never
+    # both hold. Confirmed via score_hands() directly: nuts=10000015.38,
+    # air=10000013.18, both dwarfed by straight-flush scores ~1e10, and
+    # nuts > air > every reachable ordinary-flush score.
+    #
+    # A first replacement fixture (board="2s8sKs7d4h",
+    # nuts="AsQs9h2c", air="3d6c9hJd") was itself illegal -- both hands
+    # contain 9h, which two players can never legally hold at once. That
+    # collision is exactly what Finding 1's dead/board/hero validation now
+    # catches (compute_range_ladder raises "duplicate card(s) in `dead`:
+    # ['9h']" for it), so it can no longer be constructed at all, let alone
+    # silently draw villains from a 45-card deck.
+    #
+    # The fixture below was found empirically (by calling
+    # compute_range_ladder directly with several board/hand candidates and
+    # printing the resulting ladders) to satisfy all of: no card shared
+    # between board/nuts/air; nuts far exceeds the 0.85 floor at bucket 5;
+    # air stays under the 0.15 ceiling at bucket 5; and at least one ladder
+    # is strictly non-constant across the six buckets so `eq == sorted(eq)`
+    # has more than a flat or two-point line to validate. It reuses the
+    # brief's board (6s7s4s2h9d, still real nut flush territory for "nuts")
+    # but keeps "air" a genuinely disconnected hand -- no pair with the
+    # board, no flush cards, no rank/suit overlap with "nuts" -- instead of
+    # a second, merely-lower flush. At hands=2000, seed=42, the actual
+    # ladders are:
+    #   nuts: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]                     (flat: this
+    #         hand really is the nuts here -- no flush, straight, full
+    #         house or better is reachable by anyone else on this board
+    #         once As/Ks are dead, so it wins every single matchup)
+    #   air:  [0.0, 0.0183, 0.32, 0.575, 0.7167, 0.83]           (strictly
+    #         increasing -- this is the ladder that gives monotonicity
+    #         something real to check)
     out = compute_range_ladder(
-        board="2s8sKs7d4h",
-        dead=["AsQs9h2c", "3d6c9hJd"],
-        heroes=[{"id": "nuts", "cards": "AsQs9h2c"},
-                {"id": "air",  "cards": "3d6c9hJd"}],
+        board="6s7s4s2h9d",
+        dead=["AsKs9h2c", "3dTc5s8h"],
+        heroes=[{"id": "nuts", "cards": "AsKs9h2c"},
+                {"id": "air",  "cards": "3dTc5s8h"}],
         hands=2000, seed=42,
     )
     assert out["exact"] is True
@@ -217,6 +241,10 @@ def test_river_ladder_is_exact_and_monotonic():
     for rungs in (nuts, air):
         eq = [r["equity"] for r in rungs]
         assert eq == sorted(eq), eq
+    # at least one ladder must be strictly non-constant, or the monotonic
+    # check above would pass vacuously on flat lines and could no longer
+    # catch a regression that scrambles bucket ordering.
+    assert len({r["equity"] for r in nuts}) > 1 or len({r["equity"] for r in air}) > 1
 
     # the whole point: nuts and air must look different vs the top 5%
     assert nuts[0]["equity"] > 0.85
@@ -232,6 +260,41 @@ def test_hero_missing_from_dead_is_rejected():
             board="6s7s4s",
             dead=["AsKs9h2c"],
             heroes=[{"id": "x", "cards": "QsJs8c3h"}],   # not in dead
+            hands=100, seed=1,
+        )
+
+
+def test_hero_card_on_the_board_is_rejected():
+    # 6s is both on the board and in the hero's (dead) hand -- a card
+    # cannot be simultaneously dead and live on the board.
+    with pytest.raises(ValueError):
+        compute_range_ladder(
+            board="6s7s4s2h9d",
+            dead=["6sKs9c2c"],
+            heroes=[{"id": "x", "cards": "6sKs9c2c"}],
+            hands=100, seed=1,
+        )
+
+
+def test_duplicate_card_within_one_hand_is_rejected():
+    # "As" appears twice inside a single dead entry.
+    with pytest.raises(ValueError):
+        compute_range_ladder(
+            board="6s7s4s",
+            dead=["AsAs9c2c"],
+            heroes=[{"id": "x", "cards": "AsAs9c2c"}],
+            hands=100, seed=1,
+        )
+
+
+def test_duplicate_card_across_two_dead_entries_is_rejected():
+    # "As" appears once in each of two different dead entries -- two
+    # players can never legally hold the same card.
+    with pytest.raises(ValueError):
+        compute_range_ladder(
+            board="6s7s4s",
+            dead=["AsKc9c2c", "AsQd8c3c"],
+            heroes=[{"id": "x", "cards": "AsKc9c2c"}],
             hands=100, seed=1,
         )
 

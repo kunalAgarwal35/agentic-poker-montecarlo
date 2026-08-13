@@ -226,11 +226,33 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     if board_len not in (3, 4, 5):
         raise ValueError(f"board must be 3, 4 or 5 cards, got {board_len}")
 
+    # Built WITHOUT deduping first: a card repeated within one `dead` entry
+    # ("AsAs9c2c") or across two different entries (two hands both claiming
+    # "As") must show up as a literal duplicate here. Collapsing straight
+    # into a set (as the old code did) silently absorbs both -- two hands
+    # can never legally share a card.
     dead_cards = []
     for d in dead:
         dead_cards.extend(ints_to_hand_str(hand_str_to_ints(d))[i:i + 2]
                           for i in range(0, len(d), 2))
+    if len(dead_cards) != len(set(dead_cards)):
+        seen, dupes = set(), []
+        for c in dead_cards:
+            if c in seen and c not in dupes:
+                dupes.append(c)
+            seen.add(c)
+        raise ValueError(f"duplicate card(s) in `dead`: {sorted(dupes)}")
     dead_set = set(dead_cards)
+
+    # A card cannot be simultaneously dead (in a hand) and live (on the
+    # board).
+    board_norm = ints_to_hand_str(board_ints)
+    board_cards = {board_norm[i:i + 2] for i in range(0, len(board_norm), 2)}
+    overlap = dead_set & board_cards
+    if overlap:
+        raise ValueError(
+            f"card(s) {sorted(overlap)} appear in both `dead` and `board`"
+        )
 
     for hero in heroes:
         # Normalise exactly as `dead` was, so case differences cannot cause a
@@ -257,7 +279,7 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     if villains.shape[0] == 0:
         raise ValueError("no legal villain hands remain")
 
-    r = 1 if board_len == 5 else (runouts if runouts else 800)
+    r = 1 if board_len == 5 else (runouts if runouts is not None else 800)
     runout_rows = sample_runouts(deck, board_len, r, rng)
 
     strength, hero_equity, counts = evaluate_population(
@@ -273,11 +295,15 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     seen = counts > 0
     villains, strength, hero_equity = villains[seen], strength[seen], hero_equity[:, seen]
 
+    # Category labels are read off the first sampled runout (runout_rows[0])
+    # so a flop/turn board still names a complete 5-card hand; on the river
+    # runout_rows[0] IS the real board (the only, empty-completion, row).
+    # Loop-invariant across heroes, so it's computed once here rather than
+    # inside the per-hero loop below.
+    board5 = np.concatenate([board_ints, runout_rows[0]]).astype(np.int32)
+
     ladders = []
     for j, hero in enumerate(heroes):
-        # Category labels use the median runout so a flop board still names a
-        # complete 5-card hand; on the river this is the real board.
-        board5 = np.concatenate([board_ints, runout_rows[0]]).astype(np.int32)
         ladders.append({
             "id": hero["id"],
             "rungs": build_rungs(strength, hero_equity[j], villains, list(buckets), board5),
