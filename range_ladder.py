@@ -29,9 +29,7 @@ def sample_villains(deck, num_cards, n, rng):
         return np.empty((0, num_cards), dtype=np.int32)
 
     # Exhaustive when the space is small enough to enumerate cheaply.
-    space = 1
-    for i in range(num_cards):
-        space = space * (total - i) // (i + 1)
+    space = int(BINOMIAL[total, num_cards]) if total <= 52 and num_cards <= 6 else n + 1
     if space <= max(n, 1):
         rows = [sorted(c) for c in combinations(deck.tolist(), num_cards)]
         return np.array(rows, dtype=np.int32)
