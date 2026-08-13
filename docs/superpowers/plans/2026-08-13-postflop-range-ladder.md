@@ -465,10 +465,11 @@ git commit -m "feat(ladder): single-pass villain strength and hero equity"
 from range_ladder import build_rungs
 
 def test_rungs_slice_by_strength_and_report_the_weakest_hand_in_each():
-    # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half.
+    # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half,
+    # so index i (strength 0.1*i) has hero equity 1.0 for i < 5 and 0.0 above.
     villains = np.stack([hand_str_to_ints("AsKs9h2c")] * 10)
     strength = np.linspace(0.0, 0.9, 10)
-    hero = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1], dtype=np.float64)
+    hero = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=np.float64)
 
     rungs = build_rungs(strength, hero, villains, [20, 50, 100],
                         hand_str_to_ints("6s7s4s2h9d"))
@@ -633,7 +634,10 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     dead_set = set(dead_cards)
 
     for hero in heroes:
-        cards = [hero["cards"][i:i + 2] for i in range(0, len(hero["cards"]), 2)]
+        # Normalise exactly as `dead` was, so case differences cannot cause a
+        # spurious rejection (postfloper lower-cases dead cards in places).
+        norm = ints_to_hand_str(hand_str_to_ints(hero["cards"]))
+        cards = [norm[i:i + 2] for i in range(0, len(norm), 2)]
         missing = [c for c in cards if c not in dead_set]
         if missing:
             raise ValueError(
