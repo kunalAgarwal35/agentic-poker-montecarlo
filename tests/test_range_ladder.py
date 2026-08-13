@@ -9,6 +9,7 @@ from range_ladder import (
     eligible_mask,
     score_hands,
     evaluate_population,
+    build_rungs,
 )
 
 def test_sample_villains_returns_distinct_legal_hands():
@@ -141,3 +142,31 @@ def test_a_villain_holding_a_runout_card_is_skipped_not_scored():
     assert counts[2] == 1.0
     assert strength[1] == 1.0            # beats villain 2 outright
     assert hero_equity[0, 1] == 1.0      # hero also beats villain 1
+
+def test_rungs_slice_by_strength_and_report_the_weakest_hand_in_each():
+    # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half,
+    # so index i (strength 0.1*i) has hero equity 1.0 for i < 5 and 0.0 above.
+    villains = np.stack([hand_str_to_ints("AsKs9h2c")] * 10)
+    strength = np.linspace(0.0, 0.9, 10)
+    hero = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=np.float64)
+
+    rungs = build_rungs(strength, hero, villains, [20, 50, 100],
+                        hand_str_to_ints("6s7s4s2h9d"))
+
+    assert [r["bucket"] for r in rungs] == [20, 50, 100]
+    # top 20% = the 2 strongest, which hero loses to
+    assert rungs[0]["equity"] == 0.0
+    # top 100% = everyone; hero beats 5 of 10
+    assert rungs[2]["equity"] == 0.5
+    # equity never decreases as the bucket widens
+    eq = [r["equity"] for r in rungs]
+    assert eq == sorted(eq)
+
+def test_every_bucket_holds_at_least_one_hand():
+    villains = np.stack([hand_str_to_ints("AsKs9h2c")] * 3)
+    strength = np.array([0.1, 0.5, 0.9])
+    hero = np.array([1.0, 1.0, 0.0])
+    rungs = build_rungs(strength, hero, villains, [5, 100],
+                        hand_str_to_ints("6s7s4s2h9d"))
+    assert rungs[0]["equity"] == 0.0        # top 5% rounds up to 1 hand
+    assert rungs[0]["edge"]["cards"] != ""

@@ -149,3 +149,28 @@ def evaluate_population(villains, heroes, board_ints, runouts, game, score_array
     hero_equity = np.zeros((h, n), dtype=np.float64)
     hero_equity[:, seen] = hero_sum[:, seen] / beat_cnt[seen]
     return strength, hero_equity, beat_cnt
+
+
+def describe_category(hand_ints, board5):
+    """Human label for a hand's made category. Filled in by Task 6."""
+    return ""
+
+
+def build_rungs(strength, hero_equity_row, villains, buckets, board5_for_category):
+    """One rung per bucket: hero equity vs that slice + the slice's weakest hand."""
+    order = np.argsort(-strength, kind="stable")     # strongest first
+    n = order.size
+    rungs = []
+    for pct in buckets:
+        take = max(1, int(round(n * pct / 100.0)))
+        sl = order[:take]
+        edge_idx = int(sl[-1])                        # weakest hand in the slice
+        rungs.append({
+            "bucket": pct,
+            "equity": float(hero_equity_row[sl].mean()),
+            "edge": {
+                "cards": ints_to_hand_str(villains[edge_idx]),
+                "category": describe_category(villains[edge_idx], board5_for_category),
+            },
+        })
+    return rungs
