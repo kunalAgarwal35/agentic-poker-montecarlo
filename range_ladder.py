@@ -226,6 +226,21 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     if board_len not in (3, 4, 5):
         raise ValueError(f"board must be 3, 4 or 5 cards, got {board_len}")
 
+    # Zero (or negative) runouts is only meaningful on the river, where the
+    # count is 0 by construction and sample_runouts already returns the
+    # single empty completion. Off the river it must raise, not silently
+    # produce a (0, need) runout array -- that starves evaluate_population's
+    # per-runout loop entirely, leaving every villain/hero at a structural
+    # 0.0 strength/equity, and then crashes downstream on runout_rows[0]
+    # (IndexError: empty array). `runouts is None` (the "use the default of
+    # 800" case) is unaffected by this check.
+    if runouts is not None and runouts <= 0 and board_len < 5:
+        raise ValueError(
+            f"runouts={runouts} is only meaningful on the river (5-card "
+            f"board); board here has {board_len} cards. Omit `runouts` "
+            "(defaults to 800) or pass a positive count."
+        )
+
     # Built WITHOUT deduping first: a card repeated within one `dead` entry
     # ("AsAs9c2c") or across two different entries (two hands both claiming
     # "As") must show up as a literal duplicate here. Collapsing straight

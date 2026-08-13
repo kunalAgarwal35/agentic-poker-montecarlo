@@ -299,6 +299,32 @@ def test_duplicate_card_across_two_dead_entries_is_rejected():
         )
 
 
+def test_zero_runouts_off_river_is_rejected():
+    # runouts=0 is only meaningful on the river (where the count is 0 by
+    # construction). On a flop board it must raise, not silently sample
+    # zero runouts and crash later on an empty runout_rows[0].
+    with pytest.raises(ValueError):
+        compute_range_ladder(
+            board="6s7s4s",
+            dead=["AsKs9h2c"],
+            heroes=[{"id": "x", "cards": "AsKs9h2c"}],
+            hands=100, runouts=0, seed=1,
+        )
+
+
+def test_zero_runouts_on_river_is_a_noop():
+    # On the river, board_len == 5 forces r = 1 regardless of `runouts`, so
+    # an explicit runouts=0 must still succeed exactly like the default.
+    out = compute_range_ladder(
+        board="6s7s4s2h9d",
+        dead=["AsKs9h2c"],
+        heroes=[{"id": "x", "cards": "AsKs9h2c"}],
+        hands=100, runouts=0, seed=1,
+    )
+    assert out["exact"] is True
+    assert out["runouts"] == 0
+
+
 def test_describe_category_names_a_flush():
     assert describe_category(hand_str_to_ints("AsKs9h2c"),
                              hand_str_to_ints("6s7s4s2h9d")) == "flush"
