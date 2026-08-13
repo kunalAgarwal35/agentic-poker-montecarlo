@@ -20,6 +20,7 @@ from pql import run_pql
 from pql.graphs import equity_by_street, equity_distribution, equity_vs_class
 from pql.scenario import build_scenario
 from pql.parser.ast import Query
+from range_ladder import warmup_pool
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -47,7 +48,10 @@ _warmup_started = False
 
 def _warmup():
     """Trigger numba JIT compilation in the background so the first real /pql or
-    /pql-graph request isn't paying the (~30-90s) compile cost."""
+    /pql-graph request isn't paying the (~30-90s) compile cost. Also warms the
+    persistent process pool (Task 10) that range_ladder.evaluate_population
+    parallelises onto, so the first range-ladder request doesn't pay the
+    ~5s-per-worker process-creation cost that the pool exists to avoid."""
     try:
         run_pql(
             "select avg(riverEquity(PLAYER_1)) as e from game='holdem', "
@@ -56,6 +60,11 @@ def _warmup():
         )
     except Exception as e:  # never let warmup crash the process
         app.logger.warning(f"[Warmup] failed: {e}")
+
+    try:
+        warmup_pool()
+    except Exception as e:  # never let warmup crash the process
+        app.logger.warning(f"[Warmup] process pool warmup failed: {e}")
 
 
 @app.route('/health', methods=['GET'])

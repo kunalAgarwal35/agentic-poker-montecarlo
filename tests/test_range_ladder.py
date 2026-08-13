@@ -376,3 +376,110 @@ def test_boundary_hand_colliding_with_the_first_runout_does_not_crash():
 def test_describe_category_names_a_flush():
     assert describe_category(hand_str_to_ints("AsKs9h2c"),
                              hand_str_to_ints("6s7s4s2h9d")) == "flush"
+
+
+# ---------------------------------------------------------------------------
+# Task 10: parallel evaluate_population correctness.
+#
+# Fixture reused from test_boundary_hand_colliding_with_the_first_runout_does_not_crash
+# above (already validated legal: no card shared between board/dead/heroes).
+# hands=1000, runouts=80 puts total hand-evaluations at (1000+2)*80 = 80160,
+# comfortably above _PARALLEL_MIN_EVALS (4000) so the auto-parallel path
+# would trigger on its own -- but these tests pass `parallel=`/`num_workers=`
+# explicitly so both sides of each comparison run on IDENTICAL inputs
+# regardless of where that threshold sits.
+_PARALLEL_BOARD = "6s7s4s"
+_PARALLEL_DEAD = ["AsKs9h2c", "QhJhTd3d"]
+_PARALLEL_HEROES = [{"id": "nuts", "cards": "AsKs9h2c"},
+                    {"id": "air", "cards": "QhJhTd3d"}]
+
+
+def _parallel_fixture_ladder(**kw):
+    return compute_range_ladder(
+        board=_PARALLEL_BOARD, dead=_PARALLEL_DEAD, heroes=_PARALLEL_HEROES,
+        hands=1000, runouts=80, seed=17, **kw,
+    )
+
+
+def test_parallel_matches_serial_bucket_equities_and_boundary_hands():
+    # The Task 10 correctness bar, applied literally: same board, dead,
+    # heroes, hands, runouts and seed, computed both ways, must agree to
+    # within 1e-9 on every bucket equity and produce identical boundary
+    # hands. If these ever diverge, the parallelisation -- not the sampling
+    # -- is wrong; there is no seed involved in *which* runouts get
+    # dispatched to which worker, only in which runouts get sampled in the
+    # first place (identical on both sides here).
+    serial = _parallel_fixture_ladder(parallel=False)
+    parallel = _parallel_fixture_ladder(parallel=True, num_workers=4)
+
+    assert serial["population"] == parallel["population"]
+    assert serial["runouts"] == parallel["runouts"]
+
+    for lad_s, lad_p in zip(serial["ladders"], parallel["ladders"]):
+        assert lad_s["id"] == lad_p["id"]
+        for rung_s, rung_p in zip(lad_s["rungs"], lad_p["rungs"]):
+            assert rung_s["bucket"] == rung_p["bucket"]
+            assert rung_s["equity"] == pytest.approx(rung_p["equity"], abs=1e-9)
+            # Boundary hand selection is a deterministic function of
+            # `strength` (np.argsort); requiring the cards string to match
+            # exactly (not just the equity) catches a parallelisation bug
+            # that scrambles which villain rows the chunks' partials land
+            # on, even if it happened to leave the aggregate equity numbers
+            # looking plausible.
+            assert rung_s["edge"]["cards"] == rung_p["edge"]["cards"]
+            assert rung_s["edge"]["category"] == rung_p["edge"]["category"]
+
+
+def test_evaluate_population_parallel_matches_serial_directly():
+    # Same correctness bar, one level down: call evaluate_population itself
+    # both ways (not through compute_range_ladder) so a failure here points
+    # straight at the chunk-split/dispatch/reassembly logic rather than
+    # anything in build_rungs.
+    board_ints = hand_str_to_ints(_PARALLEL_BOARD)
+    dead_cards = [c for d in _PARALLEL_DEAD for c in (d[i:i + 2] for i in range(0, len(d), 2))]
+    board_cards = [_PARALLEL_BOARD[i:i + 2] for i in range(0, len(_PARALLEL_BOARD), 2)]
+    deck = generate_deck_ints(dead_cards + board_cards)
+    heroes = np.stack([hand_str_to_ints(h["cards"]) for h in _PARALLEL_HEROES])
+    score_array = get_score_array()
+
+    rng = np.random.default_rng(17)
+    villains = sample_villains(deck, 4, 1000, rng)
+    runouts = sample_runouts(deck, 3, 80, rng)
+
+    strength_s, hero_eq_s, counts_s = evaluate_population(
+        villains, heroes, board_ints, runouts, "plo4", score_array, parallel=False,
+    )
+    strength_p, hero_eq_p, counts_p = evaluate_population(
+        villains, heroes, board_ints, runouts, "plo4", score_array,
+        parallel=True, num_workers=6,
+    )
+
+    # counts is an exact sum of 1.0 increments, one per (villain, eligible
+    # runout) pair -- order-independent regardless of chunking, so this can
+    # (and should) hold exactly, not just approximately.
+    assert np.array_equal(counts_s, counts_p)
+    np.testing.assert_allclose(strength_s, strength_p, atol=1e-9)
+    np.testing.assert_allclose(hero_eq_s, hero_eq_p, atol=1e-9)
+
+
+def test_different_worker_counts_produce_identical_output():
+    # The other half of the Task 10 correctness bar: worker count must not
+    # change results. 7 and 3 don't evenly divide 80 runouts, so the two
+    # calls genuinely split the runouts array at different points --
+    # np.array_split(..., 7) and np.array_split(..., 3) group different
+    # runouts into each partial sum, so this is a real test of summation
+    # order, not a no-op because both happen to produce the same chunks.
+    few_workers = _parallel_fixture_ladder(parallel=True, num_workers=3)
+    many_workers = _parallel_fixture_ladder(parallel=True, num_workers=7)
+
+    assert few_workers["population"] == many_workers["population"]
+    for lad_a, lad_b in zip(few_workers["ladders"], many_workers["ladders"]):
+        for rung_a, rung_b in zip(lad_a["rungs"], lad_b["rungs"]):
+            # Same 1e-9 tolerance as the parallel-vs-serial bar above: float
+            # addition is not associative, so partials grouped at different
+            # chunk boundaries are not guaranteed bit-identical even when
+            # every input (including the seed) is held fixed -- only
+            # guaranteed to agree up to floating-point summation order,
+            # which this tolerance already accounts for.
+            assert rung_a["equity"] == pytest.approx(rung_b["equity"], abs=1e-9)
+            assert rung_a["edge"]["cards"] == rung_b["edge"]["cards"]
