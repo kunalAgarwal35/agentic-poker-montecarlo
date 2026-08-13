@@ -1,7 +1,9 @@
 from itertools import combinations
 
 import numpy as np
-from range_ladder import sample_villains, sample_runouts, eligible_mask
+from card_encoding import hand_str_to_ints, generate_deck_ints
+from hand_rank_evaluator import get_score_array
+from range_ladder import sample_villains, sample_runouts, eligible_mask, score_hands
 
 def test_sample_villains_returns_distinct_legal_hands():
     deck = np.arange(20, 52, dtype=np.int32)      # 32 cards available
@@ -67,3 +69,23 @@ def test_empty_runout_leaves_every_villain_eligible():
     villains = np.array([[1, 2, 3, 4], [5, 6, 7, 8]], dtype=np.int32)
     mask = eligible_mask(villains, np.array([], dtype=np.int32))
     assert mask.tolist() == [True, True]
+
+def test_score_hands_ranks_a_flush_above_a_pair():
+    board5 = hand_str_to_ints("6s7s4s2h9d")
+    hands = np.stack([
+        hand_str_to_ints("AsKs9h2c"),   # nut flush
+        hand_str_to_ints("6h6d3c2d"),   # trips/pair
+    ])
+    out = score_hands(hands, board5, "plo4", get_score_array())
+    assert out.shape == (2,)
+    assert out[0] > out[1]
+
+def test_score_hands_chunking_matches_unchunked():
+    rng = np.random.default_rng(11)
+    deck = generate_deck_ints(["6s", "7s", "4s", "2h", "9d"])
+    hands = sample_villains(deck, 4, 300, rng)
+    board5 = hand_str_to_ints("6s7s4s2h9d")
+    sa = get_score_array()
+    a = score_hands(hands, board5, "plo4", sa, chunk=10_000)
+    b = score_hands(hands, board5, "plo4", sa, chunk=7)
+    assert np.array_equal(a, b)

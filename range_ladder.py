@@ -71,3 +71,18 @@ def eligible_mask(villains, runout):
     if runout.size == 0:
         return np.ones(villains.shape[0], dtype=bool)
     return ~np.isin(villains, runout).any(axis=1)
+
+
+def score_hands(hands, board5, game, score_array, chunk=2000):
+    """Best 5-card score for each hand on one complete board. Higher = better."""
+    hand_combos = _HAND_COMBOS[game]
+    n = hands.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    for start in range(0, n, chunk):
+        block = hands[start:start + chunk]
+        boards = np.broadcast_to(board5, (block.shape[0], 5))
+        out[start:start + chunk] = _batch_best_score(
+            block, np.ascontiguousarray(boards),
+            hand_combos, _BOARD_COMBOS, score_array, BINOMIAL,
+        )
+    return out
