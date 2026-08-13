@@ -20,6 +20,27 @@ from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
 
+# Task 8: measured with bench_range_ladder.py (hands=10000, PLO6, steady
+# -state i.e. excluding one-time process warm-up cost). Runout cost is
+# linear in R (~0.07s/runout PLO6, ~0.04s/runout PLO4); PLO6 -- the slow
+# case (15 hand-combos x 10 board-combos per hand, vs PLO4's 6x10) -- is
+# the binding constraint. R=25 measured 2.08-2.23s/board across repeated
+# runs (10-trial steady-state sample: mean 2.08s, max 2.20s, 0/10 over the
+# 2.5s target); R=28 measured 2.31s (0/10 over, but only ~0.15s margin);
+# R=30 measured 2.50-2.69s and exceeded 2.5s in 3/10 trials, so it fails
+# the budget under ordinary timing jitter on this machine.
+#
+# Accuracy target (+/-1pp run-to-run across seeds) is NOT met at this R:
+# measured max spread at R=25 across seeds (1, 2, 3) was 5.34pp for PLO6.
+# No R in the 10-30 range that fits the 2.5s budget gets anywhere near
+# +/-1pp -- spread only starts shrinking well past the point where time is
+# already over budget. Per the decision rule, the budget wins: this is the
+# largest R that reliably stays under 2.5s, not the largest R that also
+# hits +/-1pp. Displayed equities should be rounded to the nearest whole
+# percent -- the true run-to-run noise is roughly +/-5pp, so a number
+# stated to fractional-percent precision would be false precision.
+DEFAULT_RUNOUTS = 25
+
 # hand_categories.CATEGORY_TOKENS is index-aligned (low -> high strength) with
 # the category_array.npy lookup used below, so mapping through it keeps this
 # module's labels in lockstep with the engine's own naming (PQL's
@@ -265,13 +286,13 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     # produce a (0, need) runout array -- that starves evaluate_population's
     # per-runout loop entirely, leaving every villain/hero at a structural
     # 0.0 strength/equity, and then crashes downstream on runout_rows[0]
-    # (IndexError: empty array). `runouts is None` (the "use the default of
-    # 800" case) is unaffected by this check.
+    # (IndexError: empty array). `runouts is None` (the "use DEFAULT_RUNOUTS"
+    # case) is unaffected by this check.
     if runouts is not None and runouts <= 0 and board_len < 5:
         raise ValueError(
             f"runouts={runouts} is only meaningful on the river (5-card "
             f"board); board here has {board_len} cards. Omit `runouts` "
-            "(defaults to 800) or pass a positive count."
+            f"(defaults to {DEFAULT_RUNOUTS}) or pass a positive count."
         )
 
     # Built WITHOUT deduping first: a card repeated within one `dead` entry
@@ -327,7 +348,7 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     if villains.shape[0] == 0:
         raise ValueError("no legal villain hands remain")
 
-    r = 1 if board_len == 5 else (runouts if runouts is not None else 800)
+    r = 1 if board_len == 5 else (runouts if runouts is not None else DEFAULT_RUNOUTS)
     runout_rows = sample_runouts(deck, board_len, r, rng)
 
     strength, hero_equity, counts = evaluate_population(
