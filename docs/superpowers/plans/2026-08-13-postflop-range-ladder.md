@@ -340,9 +340,13 @@ git commit -m "feat(ladder): chunked per-runout hand scoring"
 - Test: `tests/test_range_ladder.py`
 
 **Interfaces:**
-- Produces: `evaluate_population(villains, heroes, board_ints, runouts, game, score_array) -> tuple[np.ndarray, np.ndarray]`
+- Produces: `evaluate_population(villains, heroes, board_ints, runouts, game, score_array) -> tuple[np.ndarray, np.ndarray, np.ndarray]`
   - `strength`: `(N,) float64` — each villain's mean share of the eligible field it beats (win + ½ tie), i.e. its equity against the population. NaN-free: villains eligible on zero runouts get `0.0`.
   - `hero_equity`: `(H, N) float64` — hero `h`'s equity against villain `i`, averaged over the runouts where `i` was eligible.
+  - `counts`: `(N,) float64` — how many runouts actually contributed to villain
+    `i`. Task 6 filters on `counts > 0`; recomputing "has data" from
+    `eligible_mask` instead would disagree on runouts skipped by the
+    `<2 eligible` guard and let an artefact reach the user as a boundary hand.
 
   This is the single `O((N + H) × R)` pass; everything later is bookkeeping on
   these two arrays.
