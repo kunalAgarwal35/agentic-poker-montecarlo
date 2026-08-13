@@ -49,3 +49,25 @@ def sample_villains(deck, num_cards, n, rng):
             if len(rows) == n:
                 break
     return np.array(rows, dtype=np.int32)
+
+
+def sample_runouts(deck, board_len, r, rng):
+    """`r` random completions of the board. River -> a single empty runout."""
+    deck = np.asarray(deck, dtype=np.int32)
+    need = 5 - board_len
+    if need <= 0:
+        return np.empty((1, 0), dtype=np.int32)
+    draw = rng.random((r, len(deck))).argsort(axis=1)[:, :need]
+    return deck[draw].astype(np.int32)
+
+
+def eligible_mask(villains, runout):
+    """False for villains holding a card that the runout also uses.
+
+    Those pairings are impossible and must never be scored. Skipping them
+    evaluates each villain over exactly the runouts compatible with it, which
+    is the correct conditional distribution -- unbiased. See spec 4.3.
+    """
+    if runout.size == 0:
+        return np.ones(villains.shape[0], dtype=bool)
+    return ~np.isin(villains, runout).any(axis=1)
