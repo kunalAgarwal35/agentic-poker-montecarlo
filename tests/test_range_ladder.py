@@ -105,7 +105,7 @@ def test_strength_orders_a_made_flush_above_air_on_the_river():
     ])
     heroes = np.stack([hand_str_to_ints("QsJs8c3h")])   # queen-high flush
     runouts = np.empty((1, 0), dtype=np.int32)
-    strength, hero_equity = evaluate_population(
+    strength, hero_equity, counts = evaluate_population(
         villains, heroes, board, runouts, "plo4", get_score_array()
     )
     assert strength[0] > strength[2] > strength[1]
@@ -115,16 +115,29 @@ def test_strength_orders_a_made_flush_above_air_on_the_river():
 
 def test_a_villain_holding_a_runout_card_is_skipped_not_scored():
     # Board 6s7s4s; the only runout is 2h9d. Villain 0 holds 2h, so the pairing
-    # is impossible -- it must be skipped, not counted as a loss.
+    # is impossible -- it must be skipped, not counted as a loss. Villains 1
+    # and 2 don't collide, so the runout is still genuinely scored (idx.size
+    # == 2 after masking out villain 0) -- an implementation that skipped the
+    # whole runout unconditionally would fail the counts/strength assertions
+    # below for villains 1 and 2.
     board = hand_str_to_ints("6s7s4s")
     villains = np.stack([
         hand_str_to_ints("As2hKd3c"),
         hand_str_to_ints("AhKh9c8c"),
+        hand_str_to_ints("QdJcTd5h"),
     ])
     heroes = np.stack([hand_str_to_ints("QsJs8d3d")])
     runouts = np.stack([hand_str_to_ints("2h9d")])
-    strength, hero_equity = evaluate_population(
+    strength, hero_equity, counts = evaluate_population(
         villains, heroes, board, runouts, "plo4", get_score_array()
     )
     assert strength[0] == 0.0            # never eligible -> no data
     assert hero_equity[0, 0] == 0.0
+    assert counts[0] == 0.0              # the collider contributed to nothing
+    # villains 1 and 2 WERE scored against each other on this runout: counts
+    # confirms two runout-contributions happened, and villain 1's strength is
+    # non-zero, proving the runout was actually evaluated, not skipped.
+    assert counts[1] == 1.0
+    assert counts[2] == 1.0
+    assert strength[1] == 1.0            # beats villain 2 outright
+    assert hero_equity[0, 1] == 1.0      # hero also beats villain 1

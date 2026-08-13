@@ -89,7 +89,20 @@ def score_hands(hands, board5, game, score_array, chunk=2000):
 
 
 def evaluate_population(villains, heroes, board_ints, runouts, game, score_array):
-    """The single O((N + H) x R) pass. Returns (strength, hero_equity)."""
+    """The single O((N + H) x R) pass. Returns (strength, hero_equity, counts).
+
+    strength: (N,) float64 -- each villain's mean share of the eligible field
+        it beats (win + 1/2 tie), i.e. its equity against the population.
+        NaN-free: villains eligible on zero counted runouts get 0.0.
+    hero_equity: (H, N) float64 -- hero h's equity against villain i, averaged
+        over the runouts counted for i.
+    counts: (N,) float64 -- the number of runouts that actually contributed to
+        villain i's strength/hero_equity (i.e. i was eligible AND the runout
+        had at least 2 eligible villains). This is a strict subset of "i was
+        eligible on this runout" -- see the guard below -- so callers that
+        need to know whether a villain has any real data must check `counts`,
+        not re-derive eligibility themselves.
+    """
     n = villains.shape[0]
     h = heroes.shape[0]
 
@@ -102,6 +115,16 @@ def evaluate_population(villains, heroes, board_ints, runouts, game, score_array
         mask = eligible_mask(villains, runout)
         idx = np.flatnonzero(mask)
         if idx.size < 2:
+            # `strength` needs at least 2 eligible villains -- with idx.size == 1
+            # the "share of field beaten" denominator (idx.size - 1) is zero,
+            # and with idx.size == 0 there's no field at all. Skipping here is
+            # correct for strength, but it also throws away hero-vs-villain
+            # equity for this runout, which IS well defined for a single
+            # eligible villain. At N=10000 the chance of <2 eligible villains
+            # on a runout is essentially zero; at N==1 every runout hits this
+            # guard and hero_equity comes back silently all-zero instead of
+            # the correct heads-up number. Degenerate for tiny populations --
+            # not restructured here, flagged for awareness.
             continue
 
         vs = score_hands(villains[idx], board5, game, score_array)
@@ -125,4 +148,4 @@ def evaluate_population(villains, heroes, board_ints, runouts, game, score_array
     strength[seen] = beat_sum[seen] / beat_cnt[seen]
     hero_equity = np.zeros((h, n), dtype=np.float64)
     hero_equity[:, seen] = hero_sum[:, seen] / beat_cnt[seen]
-    return strength, hero_equity
+    return strength, hero_equity, beat_cnt
