@@ -7,6 +7,7 @@ from itertools import combinations
 import numpy as np
 
 from card_encoding import generate_deck_ints, hand_str_to_ints, ints_to_hand_str
+from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
 from hand_rank_evaluator import (
     _BOARD_COMBOS,
@@ -15,6 +16,27 @@ from hand_rank_evaluator import (
     detect_game_type,
     get_score_array,
 )
+from optimized_evaluator import best5_category_omaha_numba, get_category_array
+
+DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
+
+# hand_categories.CATEGORY_TOKENS is index-aligned (low -> high strength) with
+# the category_array.npy lookup used below, so mapping through it keeps this
+# module's labels in lockstep with the engine's own naming (PQL's
+# exactHandType, category_playground, etc.) instead of re-deriving strength
+# bands from score_array by hand. Only the spacing/casing differs from the
+# brief's nine literal labels.
+_CATEGORY_LABELS = {
+    "highcard": "high card",
+    "pair": "pair",
+    "twopair": "two pair",
+    "trips": "trips",
+    "straight": "straight",
+    "flush": "flush",
+    "fullhouse": "full house",
+    "quads": "quads",
+    "straightflush": "straight flush",
+}
 
 
 def sample_villains(deck, num_cards, n, rng):
@@ -152,8 +174,25 @@ def evaluate_population(villains, heroes, board_ints, runouts, game, score_array
 
 
 def describe_category(hand_ints, board5):
-    """Human label for a hand's made category. Filled in by Task 6."""
-    return ""
+    """Human label for a hand's made category, e.g. "flush", "full house".
+
+    Delegates to optimized_evaluator's numba category lookup (the same
+    category_array.npy the rest of the engine uses via
+    pql.runtime.evaluator.player_categories) rather than re-deriving hand
+    strength here, so labels agree with the rest of the engine by
+    construction.
+    """
+    game = detect_game_type(len(hand_ints))
+    idx = best5_category_omaha_numba(
+        np.asarray(hand_ints, dtype=np.int32),
+        np.asarray(board5, dtype=np.int32),
+        _HAND_COMBOS[game],
+        _BOARD_COMBOS,
+        get_score_array(),
+        get_category_array(),
+        BINOMIAL,
+    )
+    return _CATEGORY_LABELS[CATEGORY_TOKENS[int(idx)]]
 
 
 def build_rungs(strength, hero_equity_row, villains, buckets, board5_for_category):
@@ -174,3 +213,79 @@ def build_rungs(strength, hero_equity_row, villains, buckets, board5_for_categor
             },
         })
     return rungs
+
+
+def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
+                         hands=10000, runouts=None, seed=None):
+    """The whole feature: hero equity vs board-strength percentile slices.
+
+    See spec Section 5 for the response shape.
+    """
+    board_ints = hand_str_to_ints(board)
+    board_len = len(board_ints)
+    if board_len not in (3, 4, 5):
+        raise ValueError(f"board must be 3, 4 or 5 cards, got {board_len}")
+
+    dead_cards = []
+    for d in dead:
+        dead_cards.extend(ints_to_hand_str(hand_str_to_ints(d))[i:i + 2]
+                          for i in range(0, len(d), 2))
+    dead_set = set(dead_cards)
+
+    for hero in heroes:
+        # Normalise exactly as `dead` was, so case differences cannot cause a
+        # spurious rejection (postfloper lower-cases dead cards in places).
+        norm = ints_to_hand_str(hand_str_to_ints(hero["cards"]))
+        cards = [norm[i:i + 2] for i in range(0, len(norm), 2)]
+        missing = [c for c in cards if c not in dead_set]
+        if missing:
+            raise ValueError(
+                f"hero {hero['id']} cards {missing} absent from `dead`; "
+                "villains would be allowed to hold them"
+            )
+
+    hero_arrays = np.stack([hand_str_to_ints(h["cards"]) for h in heroes])
+    num_cards = hero_arrays.shape[1]
+    game = detect_game_type(num_cards)
+    score_array = get_score_array()
+
+    deck = generate_deck_ints(list(dead_set) + [board[i:i + 2]
+                                                for i in range(0, len(board), 2)])
+    rng = np.random.default_rng(seed)
+
+    villains = sample_villains(deck, num_cards, hands, rng)
+    if villains.shape[0] == 0:
+        raise ValueError("no legal villain hands remain")
+
+    r = 1 if board_len == 5 else (runouts if runouts else 800)
+    runout_rows = sample_runouts(deck, board_len, r, rng)
+
+    strength, hero_equity, counts = evaluate_population(
+        villains, hero_arrays, board_ints, runout_rows, game, score_array
+    )
+
+    # A villain that contributed to no runout carries no data; drop it rather
+    # than letting a structural 0.0 masquerade as "weakest hand in the
+    # population". Filter on `counts` -- the contribution count evaluate_population
+    # actually used -- NOT on a recomputed eligible_mask union. The two differ on
+    # runouts skipped by the <2-eligible guard, and that gap is exactly how an
+    # artefact reaches the user as a boundary hand.
+    seen = counts > 0
+    villains, strength, hero_equity = villains[seen], strength[seen], hero_equity[:, seen]
+
+    ladders = []
+    for j, hero in enumerate(heroes):
+        # Category labels use the median runout so a flop board still names a
+        # complete 5-card hand; on the river this is the real board.
+        board5 = np.concatenate([board_ints, runout_rows[0]]).astype(np.int32)
+        ladders.append({
+            "id": hero["id"],
+            "rungs": build_rungs(strength, hero_equity[j], villains, list(buckets), board5),
+        })
+
+    return {
+        "population": int(villains.shape[0]),
+        "runouts": 0 if board_len == 5 else int(runout_rows.shape[0]),
+        "exact": board_len == 5,
+        "ladders": ladders,
+    }

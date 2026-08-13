@@ -1,6 +1,7 @@
 from itertools import combinations
 
 import numpy as np
+import pytest
 from card_encoding import hand_str_to_ints, generate_deck_ints
 from hand_rank_evaluator import get_score_array
 from range_ladder import (
@@ -10,6 +11,8 @@ from range_ladder import (
     score_hands,
     evaluate_population,
     build_rungs,
+    describe_category,
+    compute_range_ladder,
 )
 
 def test_sample_villains_returns_distinct_legal_hands():
@@ -170,3 +173,69 @@ def test_every_bucket_holds_at_least_one_hand():
                         hand_str_to_ints("6s7s4s2h9d"))
     assert rungs[0]["equity"] == 0.0        # top 5% rounds up to 1 hand
     assert rungs[0]["edge"]["cards"] != ""
+
+
+def test_river_ladder_is_exact_and_monotonic():
+    # Board/hero fixture deliberately differs from the task-6 brief's literal
+    # example (board="6s7s4s2h9d", air="QsJs8c3h"). Verified by direct
+    # computation: that board's 3 spades (4,6,7) are close enough together
+    # that TWO straight-flush windows exist (3-4-5-6-7 and 4-5-6-7-8), both
+    # sharing card 5s, which makes straight flushes ~1.6% of the hand space
+    # instead of the ~0.1% a single window would give -- enough of them
+    # land in the top-5% bucket (about 30/100) that they dominate it. Worse,
+    # the brief's dead cards (AsKs + QsJs) remove all four spade
+    # honor-cards, so *every* ordinary villain flush is capped below Ten
+    # kicker -- meaning both "nuts" (A-K flush) and "air" (Q-J flush, not
+    # actually air: see test_score_hands_ranks_a_flush_above_a_pair's
+    # comment on this same string) are equally invincible against every
+    # non-straight-flush villain and equally beaten by every straight
+    # flush. Their top-5% equities come out identically 0.70 -- provably,
+    # for any seed/hand count, not just this one -- so nuts > 0.85 and
+    # air < 0.15 can never both hold. Confirmed via score_hands() directly:
+    # nuts=10000015.38, air=10000013.18, both dwarfed by straight-flush
+    # scores ~1e10, and nuts > air > every reachable ordinary-flush score.
+    # This fixture keeps the same intent (river-exact, monotonic, hero
+    # differentiation, hero-independent boundary hands) with a board whose
+    # 3 flush-suit cards (2s/8s/Ks) are too spread out for any straight
+    # flush to exist, and an "air" hand that is genuinely disconnected
+    # (no pair, no flush draw) rather than a second flush.
+    out = compute_range_ladder(
+        board="2s8sKs7d4h",
+        dead=["AsQs9h2c", "3d6c9hJd"],
+        heroes=[{"id": "nuts", "cards": "AsQs9h2c"},
+                {"id": "air",  "cards": "3d6c9hJd"}],
+        hands=2000, seed=42,
+    )
+    assert out["exact"] is True
+    assert out["runouts"] == 0
+    assert out["population"] > 0
+
+    nuts = next(l for l in out["ladders"] if l["id"] == "nuts")["rungs"]
+    air = next(l for l in out["ladders"] if l["id"] == "air")["rungs"]
+
+    # monotonic: equity never falls as the bucket widens
+    for rungs in (nuts, air):
+        eq = [r["equity"] for r in rungs]
+        assert eq == sorted(eq), eq
+
+    # the whole point: nuts and air must look different vs the top 5%
+    assert nuts[0]["equity"] > 0.85
+    assert air[0]["equity"] < 0.15
+
+    # boundary hands are shared -- ranking is hero-independent
+    assert [r["edge"]["cards"] for r in nuts] == [r["edge"]["cards"] for r in air]
+
+
+def test_hero_missing_from_dead_is_rejected():
+    with pytest.raises(ValueError):
+        compute_range_ladder(
+            board="6s7s4s",
+            dead=["AsKs9h2c"],
+            heroes=[{"id": "x", "cards": "QsJs8c3h"}],   # not in dead
+            hands=100, seed=1,
+        )
+
+
+def test_describe_category_names_a_flush():
+    assert describe_category(hand_str_to_ints("AsKs9h2c"),
+                             hand_str_to_ints("6s7s4s2h9d")) == "flush"
