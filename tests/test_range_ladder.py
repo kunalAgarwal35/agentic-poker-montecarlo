@@ -350,7 +350,7 @@ def test_describe_category_names_a_flush():
 # compute_range_ladder: end-to-end behavior.
 # ---------------------------------------------------------------------------
 
-def test_river_ladder_is_exact_and_monotonic():
+def test_river_ladder_is_monotonic_on_a_sampled_population():
     # Same fixture Task 11 used (see its comment history for why this
     # board/hand pair was picked over the brief's literal example).
     out = compute_range_ladder(
@@ -360,7 +360,14 @@ def test_river_ladder_is_exact_and_monotonic():
                 {"id": "air",  "cards": "3dTc5s8h"}],
         hands=2000, rank_runouts=20, trials_per_bucket=800, seed=42,
     )
-    assert out["exact"] is True
+    # NOT exact, despite the river: Pass 2 enumerates here (nothing left to
+    # draw), but Pass 1's population is a 2,000-hand SUBSAMPLE of the
+    # C(39,4)=82,251 legal hands this 39-card deck allows. Final review,
+    # Finding 1 -- `exact` used to be `board_len == 5` alone and said True
+    # here while the 15% rung moved 3.6pp seed to seed. See
+    # test_exact_requires_an_enumerated_population_not_just_a_river below
+    # for both directions pinned side by side.
+    assert out["exact"] is False
     assert out["population"] > 0
     assert out["rank_runouts"] == 1        # river: single empty completion
     assert out["trials_per_bucket"] == 800
@@ -427,6 +434,74 @@ def test_river_ladder_is_identical_across_seeds_when_population_is_exhaustive():
             assert rung_a["equity"] == rung_b["equity"]
             assert rung_a["edge"]["cards"] == rung_b["edge"]["cards"]
             assert rung_a["edge"]["category"] == rung_b["edge"]["category"]
+
+
+def test_exact_requires_an_enumerated_population_not_just_a_river():
+    """Final review, Finding 1: `exact` must mean the villain population was
+    genuinely ENUMERATED, not merely that Pass 2 had no runout left to draw.
+
+    Both directions are pinned here on the SAME river board, with only
+    `hands` (and the deck size) differing, so nothing but the population
+    branch can explain the two answers:
+
+    - `hands` far below the number of legal hands -> `sample_villains`
+      subsamples -> `exact: False`, even though it is the river.
+    - `hands` above the whole (deliberately shrunk) space -> the
+      exhaustive branch runs -> `exact: True`.
+
+    The False case is the one that regressed: it reported True while its
+    15% rung moved 3.6pp and its top-5% edge hand differed on all 5 seeds
+    the reviewer tried.
+    """
+    board = "6s7s4s2h9d"
+    nuts = "AsKs9h2c"
+    air = "3dTc5s8h"
+
+    # --- sampled population: C(39,4) = 82,251 legal hands, ask for 500 ---
+    sampled = compute_range_ladder(
+        board=board, dead=[nuts, air],
+        heroes=[{"id": "nuts", "cards": nuts}],
+        hands=500, rank_runouts=10, trials_per_bucket=100, seed=1,
+    )
+    assert sampled["population"] == 500          # a subsample, not the space
+    assert sampled["exact"] is False
+
+    # --- enumerated population: shrink the live deck to 12 cards, so the
+    # whole space (C(12,4) = 495) is smaller than the requested `hands` ---
+    used = {board[i:i + 2] for i in range(0, len(board), 2)}
+    used |= {nuts[i:i + 2] for i in range(0, len(nuts), 2)}
+    used |= {air[i:i + 2] for i in range(0, len(air), 2)}
+    full_deck = ints_to_hand_str(generate_deck_ints([]))
+    remaining = [full_deck[i:i + 2] for i in range(0, len(full_deck), 2)
+                if full_deck[i:i + 2] not in used]
+    blocker = "".join(remaining[12:])
+    enumerated = compute_range_ladder(
+        board=board, dead=[nuts, air, blocker],
+        heroes=[{"id": "nuts", "cards": nuts}],
+        hands=500, rank_runouts=10, trials_per_bucket=100, seed=1,
+    )
+    assert enumerated["population"] == 495       # every legal hand, exactly once
+    assert enumerated["exact"] is True
+
+
+def test_flop_is_never_exact_even_on_an_enumerated_population():
+    # The population half is necessary but not sufficient: a flop still has
+    # two cards to draw, so Pass 2 samples and the answer is not exact.
+    board = "6s7s4s"
+    nuts = "AsKs9h2c"
+    used = {board[i:i + 2] for i in range(0, len(board), 2)}
+    used |= {nuts[i:i + 2] for i in range(0, len(nuts), 2)}
+    full_deck = ints_to_hand_str(generate_deck_ints([]))
+    remaining = [full_deck[i:i + 2] for i in range(0, len(full_deck), 2)
+                if full_deck[i:i + 2] not in used]
+    blocker = "".join(remaining[12:])
+    out = compute_range_ladder(
+        board=board, dead=[nuts, blocker],
+        heroes=[{"id": "nuts", "cards": nuts}],
+        hands=1000, rank_runouts=10, trials_per_bucket=100, seed=1,
+    )
+    assert out["population"] == 495               # enumerated...
+    assert out["exact"] is False                  # ...but still a sampled runout
 
 
 def test_flop_ladder_reports_the_requested_rank_runouts():

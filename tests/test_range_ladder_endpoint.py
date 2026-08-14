@@ -31,7 +31,10 @@ def _distinct_cards(n, exclude=()):
 def test_range_ladder_returns_one_rung_per_bucket_in_requested_order():
     # Non-default, non-sorted bucket order -- proves the response echoes
     # the CALLER's order rather than always emitting DEFAULT_BUCKETS order.
-    # River board (5 cards): cheap and gives exact:True to check too.
+    # River board (5 cards): cheap, and reports exact:False because
+    # hands=5000 subsamples the C(39,4)=82,251 legal hands this deck allows
+    # (final review, Finding 1 -- exactness is about the POPULATION too, not
+    # just about having no runout left to draw).
     # hands=5000 x heroes=2 is also comfortably above the pool's parallel
     # dispatch threshold, so this test incidentally warms the process pool
     # for the rest of the module.
@@ -46,7 +49,7 @@ def test_range_ladder_returns_one_rung_per_bucket_in_requested_order():
     })
     assert resp.status_code == 200, resp.get_data(as_text=True)
     body = resp.get_json()
-    assert body["exact"] is True
+    assert body["exact"] is False
     assert body["population"] > 0
     assert len(body["ladders"]) == 2
     for ladder in body["ladders"]:
@@ -55,6 +58,33 @@ def test_range_ladder_returns_one_rung_per_bucket_in_requested_order():
         for rung in rungs:
             assert 0.0 <= rung["equity"] <= 1.0
             assert "cards" in rung["edge"] and "category" in rung["edge"]
+
+
+def test_river_with_an_enumerated_population_reports_exact_true():
+    # The other direction of final review Finding 1, end to end through the
+    # route: same river board as above, but the live deck is shrunk to 12
+    # cards (everything else parked in `dead`) so C(12,4)=495 < hands and
+    # sample_villains enumerates the whole population instead of sampling
+    # it. Only then may the response claim exactness.
+    board = "6s7s4s2h9d"
+    hero = "AsKs9h2c"
+    used = {board[i:i + 2] for i in range(0, len(board), 2)}
+    used |= {hero[i:i + 2] for i in range(0, len(hero), 2)}
+    live = _distinct_cards(12, exclude=used)
+    blocker = "".join(c for c in _ALL_CARDS if c not in used and c not in live)
+    resp = client.post("/range_ladder", json={
+        "board": board,
+        "dead": [hero, blocker],
+        "heroes": [{"id": "nuts", "cards": hero}],
+        "hands": 5000,
+        "rank_runouts": 5,
+        "trials_per_bucket": 50,
+        "seed": 3,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    body = resp.get_json()
+    assert body["population"] == 495
+    assert body["exact"] is True
 
 
 def test_missing_board_is_a_400():

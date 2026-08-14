@@ -232,11 +232,39 @@ def warmup_pool():
         f.result()
 
 
+def population_is_exhaustive(deck_size, num_cards, n):
+    """True when `sample_villains(deck, num_cards, n, ...)` will return the
+    COMPLETE set of legal hands rather than a random subsample of it.
+
+    Single source of truth for that branch condition: `sample_villains`
+    itself calls this, and `compute_range_ladder` calls it to decide whether
+    the response may advertise `exact` (see its docstring). Deciding it in
+    two places invites the two from drifting apart, which is exactly the
+    defect this replaced -- `exact` used to be `board_len == 5` alone, so a
+    river whose population was a 5,000-hand subsample of C(39,4)=82,251
+    still claimed exactness while its 15% rung moved 3.6pp seed to seed.
+
+    A deck too small to deal even one hand (`deck_size < num_cards`) is
+    reported as NOT exhaustive: `sample_villains` returns zero rows there
+    and `compute_range_ladder` rejects that outright, so nothing downstream
+    is ever exact on an empty population.
+    """
+    if deck_size < num_cards:
+        return False
+    space = (int(BINOMIAL[deck_size, num_cards])
+             if deck_size <= 52 and num_cards <= 6 else n + 1)
+    return space <= max(n, 1)
+
+
 def sample_villains(deck, num_cards, n, rng):
     """Distinct legal villain hands drawn from `deck`, as sorted rows.
 
     Falls back to exhaustive enumeration when the space is smaller than `n`,
     so tiny decks return every hand exactly once instead of looping forever.
+    Whether that fallback fires is `population_is_exhaustive(len(deck),
+    num_cards, n)` -- callers that need to know which branch ran (the
+    response's `exact` flag does) must ask that function rather than
+    re-deriving the condition.
 
     This is Pass 1's villain population: `n` DISTINCT hands, each scored
     against Pass 1's shared runouts to produce a ranking. Distinctness here
@@ -251,8 +279,7 @@ def sample_villains(deck, num_cards, n, rng):
         return np.empty((0, num_cards), dtype=np.int32)
 
     # Exhaustive when the space is small enough to enumerate cheaply.
-    space = int(BINOMIAL[total, num_cards]) if total <= 52 and num_cards <= 6 else n + 1
-    if space <= max(n, 1):
+    if population_is_exhaustive(total, num_cards, n):
         rows = [sorted(c) for c in combinations(deck.tolist(), num_cards)]
         return np.array(rows, dtype=np.int32)
 
@@ -758,8 +785,22 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     Finding 1 of the Task 13 fix-round-2 review: the old code sampled WITH
     REPLACEMENT from bucket members even on the river, which left a river
     ladder claiming `exact: True` while its bucket-5 equity still moved
-    ~14.6pp seed to seed. `exact` in the response is True only when this
-    exact-enumeration path ran, i.e. only on the river.
+    ~14.6pp seed to seed.
+
+    `exact` therefore requires BOTH halves of the computation to be free of
+    sampling, not just Pass 2's:
+
+    - no runout left to draw (the river, so Pass 2 enumerates as above), AND
+    - the villain POPULATION is the complete set of legal hands, i.e.
+      `sample_villains` took its exhaustive-enumeration branch
+      (`population_is_exhaustive`), not its random-subsample branch.
+
+    The second condition was missing until the final review's Finding 1:
+    `exact` was `board_len == 5` alone, so a river ranking a 5,000-hand
+    subsample of the C(39,4)=82,251 possible PLO4 hands reported
+    `exact: True` while its 15% rung moved 3.6pp and its top-5% edge hand
+    changed on every seed. A sampled population is a sampled answer no
+    matter how exactly Pass 2 then measures it.
 
     Equity is generally NOT monotonically non-decreasing in bucket width
     (a wider bucket does not always mean at least as much hero equity).
@@ -842,6 +883,9 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     rng = np.random.default_rng(seed)
 
     # --- Pass 1: rank hands on shared runouts ---
+    # Asked BEFORE sampling (it is a property of the request, not of the
+    # draw) and reported as half of `exact` below -- see the docstring.
+    population_exhaustive = population_is_exhaustive(deck.size, hole_count, hands)
     villain_hands = sample_villains(deck, hole_count, hands, rng)
     if villain_hands.shape[0] == 0:
         raise ValueError("no legal villain hands remain")
@@ -911,7 +955,10 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
 
     return {
         "population": int(villain_hands.shape[0]),
-        "exact": board_len == 5,
+        # Both halves must hold: nothing left to sample on the runout side
+        # (river) AND nothing sampled on the population side. See the
+        # docstring; `population_exhaustive` is computed above.
+        "exact": board_len == 5 and population_exhaustive,
         "rank_runouts": int(rank_runouts_arr.shape[0]),
         "trials_per_bucket": int(trials_per_bucket),
         "ladders": ladders,
