@@ -340,9 +340,13 @@ git commit -m "feat(ladder): chunked per-runout hand scoring"
 - Test: `tests/test_range_ladder.py`
 
 **Interfaces:**
-- Produces: `evaluate_population(villains, heroes, board_ints, runouts, game, score_array) -> tuple[np.ndarray, np.ndarray]`
+- Produces: `evaluate_population(villains, heroes, board_ints, runouts, game, score_array) -> tuple[np.ndarray, np.ndarray, np.ndarray]`
   - `strength`: `(N,) float64` — each villain's mean share of the eligible field it beats (win + ½ tie), i.e. its equity against the population. NaN-free: villains eligible on zero runouts get `0.0`.
   - `hero_equity`: `(H, N) float64` — hero `h`'s equity against villain `i`, averaged over the runouts where `i` was eligible.
+  - `counts`: `(N,) float64` — how many runouts actually contributed to villain
+    `i`. Task 6 filters on `counts > 0`; recomputing "has data" from
+    `eligible_mask` instead would disagree on runouts skipped by the
+    `<2 eligible` guard and let an artefact reach the user as a boundary hand.
 
   This is the single `O((N + H) × R)` pass; everything later is bookkeeping on
   these two arrays.
@@ -465,10 +469,11 @@ git commit -m "feat(ladder): single-pass villain strength and hero equity"
 from range_ladder import build_rungs
 
 def test_rungs_slice_by_strength_and_report_the_weakest_hand_in_each():
-    # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half.
+    # 10 villains with strengths 0.0 .. 0.9; hero beats exactly the weak half,
+    # so index i (strength 0.1*i) has hero equity 1.0 for i < 5 and 0.0 above.
     villains = np.stack([hand_str_to_ints("AsKs9h2c")] * 10)
     strength = np.linspace(0.0, 0.9, 10)
-    hero = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1], dtype=np.float64)
+    hero = np.array([1, 1, 1, 1, 1, 0, 0, 0, 0, 0], dtype=np.float64)
 
     rungs = build_rungs(strength, hero, villains, [20, 50, 100],
                         hand_str_to_ints("6s7s4s2h9d"))
@@ -633,7 +638,10 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     dead_set = set(dead_cards)
 
     for hero in heroes:
-        cards = [hero["cards"][i:i + 2] for i in range(0, len(hero["cards"]), 2)]
+        # Normalise exactly as `dead` was, so case differences cannot cause a
+        # spurious rejection (postfloper lower-cases dead cards in places).
+        norm = ints_to_hand_str(hand_str_to_ints(hero["cards"]))
+        cards = [norm[i:i + 2] for i in range(0, len(norm), 2)]
         missing = [c for c in cards if c not in dead_set]
         if missing:
             raise ValueError(
@@ -657,15 +665,17 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     r = 1 if board_len == 5 else (runouts if runouts else 800)
     runout_rows = sample_runouts(deck, board_len, r, rng)
 
-    strength, hero_equity = evaluate_population(
+    strength, hero_equity, counts = evaluate_population(
         villains, hero_arrays, board_ints, runout_rows, game, score_array
     )
 
-    # A villain eligible on zero runouts carries no data; drop it rather than
-    # letting a 0.0 masquerade as "weakest hand in the population".
-    seen = np.zeros(villains.shape[0], dtype=bool)
-    for runout in runout_rows:
-        seen |= eligible_mask(villains, runout)
+    # A villain that contributed to no runout carries no data; drop it rather
+    # than letting a structural 0.0 masquerade as "weakest hand in the
+    # population". Filter on `counts` — the contribution count evaluate_population
+    # actually used — NOT on a recomputed eligible_mask union. The two differ on
+    # runouts skipped by the <2-eligible guard, and that gap is exactly how an
+    # artefact reaches the user as a boundary hand.
+    seen = counts > 0
     villains, strength, hero_equity = villains[seen], strength[seen], hero_equity[:, seen]
 
     ladders = []
