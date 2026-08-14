@@ -46,20 +46,53 @@ DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
 
 # --- Pass 1 defaults: rank hands on shared runouts ---------------------
 #
-# DEFAULT_HANDS: size of the villain-hand population Pass 1 ranks. 10,000
-# matches the population size prior tasks (8-12) swept for the SAME role
-# under the old hands x runouts grid and, later, joint trial sampling --
-# large enough that percentile cuts (5% = 500 hands) still contain plenty
-# of hands even at the tightest bucket. A churn/spread sweep (see
-# DEFAULT_RANK_RUNOUTS and task-13-report.md) found `hands` is NOT the
-# lever for closing the remaining per-bucket spread -- a fixed-population
-# check (same 10,000 hands re-ranked across 16 seeds, only the runouts
-# varying) showed spread almost as large as letting the population vary
-# too, so the dominant noise source is Pass-1 ranking precision
-# (rank_runouts), not how many hands get sampled in the first place.
-# Raising `hands` further mainly buys Pass-1 wall-clock cost, not
-# accuracy, at this budget.
-DEFAULT_HANDS = 10_000
+# BUDGET: ~6s, not 2.5s. This is a deliberate user tradeoff (fix round 1,
+# 2026-08-14), traded UP from the original 2.5s budget in exchange for a
+# tighter top bucket -- range-ladder computation runs once per street, so
+# the user chose to spend more wall-clock for less noise. Do NOT
+# "optimise" this back down toward 2.5s; that would silently undo a
+# decision the user made after seeing the accuracy/latency tradeoff
+# below, not a performance regression to fix.
+#
+# DEFAULT_HANDS: size of the villain-hand population Pass 1 ranks. Once
+# rank_runouts=300 was fixed (see DEFAULT_RANK_RUNOUTS below), `hands` IS
+# the remaining lever for shrinking per-bucket spread -- spread scales as
+# ~1/sqrt(hands) (order-statistics estimation noise on the percentile
+# boundary, i.e. Stage-A "which hands even got sampled" noise, not Pass-1
+# ranking noise -- see task-13-report.md's fix-round-1 addendum for the
+# measurement that separated these two effects).
+#
+# 16-seed PLO6 sweep (board=6s7s4s, dead=[AsKs9h2c3d4d, QhJhTd3s5s8s], 1
+# hero, rank_runouts=300, trials_per_bucket=50,000 fixed):
+#   hands= 10,000: mean 1.83s                    worst-bucket spread 3.32pp
+#   hands= 40,000: mean 4.38s, MAX 10.26s (*)     worst-bucket spread 2.40pp
+#   hands= 60,000: mean 5.61s, max 5.78s          worst-bucket spread 1.75pp
+# (*) A single 10.26s outlier against an otherwise-~4s-mean run, seen once
+# across 16 seeds at hands=40,000 -- exactly the tail-latency behaviour
+# flagged in Task 10 (parallel dispatch is set by the slowest chunk, and
+# occasional stragglers happen). A cheap repro attempt (8 fresh seeds,
+# same parameters) did NOT reproduce it (max 4.11s, mean 3.92s) -- treated
+# as a one-off (pool contention / GC / OS scheduling on the measuring
+# box), not a deterministic property of hands=40,000, and not chased
+# further per the fix-round-1 instruction not to spend long on it. This IS
+# the reason hands=60,000 was chosen over the faster-on-average 40,000:
+# its max (5.78s) sits close to its mean, which is the property wanted --
+# not "fast when nothing goes wrong".
+#
+# hands=60,000, PLO6, 1 hero, 16 seeds, rank_runouts=300,
+# trials_per_bucket=50,000: mean 5.61s, max 5.78s. Per-bucket spread (pp):
+# 5%=1.62  15%=1.27  25%=1.75  40%=1.67  60%=1.25  100%=0.47.
+# PLAINLY: +/-1pp is NOT reached at this operating point -- the worst
+# bucket (25%, 1.75pp) is still well above it, and only bucket 100% (the
+# whole population) is actually inside +/-1pp. Do not read these numbers
+# as "close enough" -- they are the accuracy this budget buys, not the
+# target. Closing the remaining gap to 1pp needs roughly 2.6x more hands
+# again (since spread ~ 1/sqrt(hands), (1.75/1.0)^2 ~= 3.1x fewer... i.e.
+# ~2.6-3x more hands than 60,000 -- call it ~155,000 hands, extrapolated
+# to ~14s at this box's measured per-hand Pass-1 cost). This is a
+# MEASURED EXTRAPOLATION, not a measurement -- nobody has actually run
+# hands=155,000 and confirmed 1pp or ~14s.
+DEFAULT_HANDS = 60_000
 
 # DEFAULT_RANK_RUNOUTS: how many shared runouts Pass 1 scores every hand
 # against. The brief's own suggested starting point (30) was measured and
@@ -71,15 +104,15 @@ DEFAULT_HANDS = 10_000
 # 300 cuts churn to 29.5% and edge-hand spread to 1.4-2.4pp -- a real,
 # large improvement, though not a complete fix (see task-13-report.md's
 # "Correctness bar" section for the honest remainder: some churn survives
-# even here, and closing it further trades directly against the 2.5s
-# budget via Pass 1's hands x rank_runouts cost). 300 was chosen as the
-# point past which pushing rank_runouts further stopped being the
-# most efficient use of the remaining time budget: at hands=10,000 it
-# still leaves ~39% headroom against the 2.5s PLO6 budget together with a
-# useful DEFAULT_TRIALS_PER_BUCKET (see below), whereas rank_runouts=1000
-# alone (holding trials_per_bucket fixed) blew the budget (3.3s+) without
-# proportionally shrinking the residual bucket-5 spread -- see
-# task-13-report.md for the full sweep.
+# even here). 300 was chosen, at the ORIGINAL 2.5s budget, as the point
+# past which pushing rank_runouts further stopped being the most
+# efficient use of the remaining time budget (rank_runouts=1000 alone
+# blew that budget, 3.3s+, without proportionally shrinking the residual
+# spread). Fix round 1 (2026-08-14) raised the time budget to ~6s and
+# spent essentially all of that extra headroom on DEFAULT_HANDS instead
+# of raising this further -- see DEFAULT_HANDS's comment above for why:
+# once rank_runouts=300 was fixed, `hands` (not rank_runouts) was the
+# lever that measurably moved the remaining spread.
 DEFAULT_RANK_RUNOUTS = 300
 
 # --- Pass 2 defaults: stratified equity, independent runouts ----------
@@ -89,33 +122,26 @@ DEFAULT_RANK_RUNOUTS = 300
 # (population sampling gave the top-5% bucket only 5% of trials, so the
 # tight buckets were the worst-measured ones even though they mattered
 # most). Equal budgets give equal precision across buckets regardless of
-# how few hands populate the tightest one -- confirmed in the sweep below:
-# spread is no longer "tight buckets worse", it now tracks Pass-1 ranking
-# noise (bucket 5, the smallest slice, still shows the most churn -- see
-# DEFAULT_RANK_RUNOUTS) rather than trial count.
+# how few hands populate the tightest one. Held fixed at 50,000 through
+# fix round 1's hands sweep (see DEFAULT_HANDS above) because `hands`, not
+# `trials_per_bucket`, was the lever that measurably moved the remaining
+# spread once rank_runouts=300 was fixed -- see DEFAULT_HANDS's comment
+# for the current (2026-08-14) chosen operating point, its measured mean
+# and max seconds, its per-bucket spread, and the plain statement that
+# +/-1pp is NOT reached there.
 #
-# Picked jointly with DEFAULT_HANDS/DEFAULT_RANK_RUNOUTS via the same
-# methodology Task 12 used for the old DEFAULT_TRIALS: PLO6 (the binding
-# case for TIME), >=16 seeds (the brief's minimum -- an 8-seed and a
-# 3-seed estimate each produced a confidently wrong conclusion earlier in
-# this project), inside the 2.5s budget with real headroom for a loaded
-# machine rather than the largest value that fits an idle box (the old
+# Original selection (Task 13, 2.5s budget, hands=10,000): PLO6 (the
+# binding case for TIME), >=16 seeds (the brief's minimum -- an 8-seed and
+# a 3-seed estimate each produced a confidently wrong conclusion earlier
+# in this project), inside budget with real headroom for a loaded machine
+# rather than the largest value that fits an idle box (the old
 # DEFAULT_TRIALS was picked at 3.6% headroom and overran 2.5s on a busy
-# machine -- see git history / task-12-report.md).
-#
-# hands=10,000 / rank_runouts=300 / trials_per_bucket=50,000, PLO6, single
-# hero, 16 seeds: mean 1.481s, max 1.526s -- ~39% headroom under 2.5s.
-# Per-bucket equity spread (pp): 5%=2.73  15%=1.28  25%=1.66  40%=1.02
-# 60%=1.27  100%=0.67. NOT every bucket is inside +/-1pp at this budget
-# (bucket 5 is the worst, at 2.73pp) -- reported honestly, not rounded
-# away: closing the remainder needs a materially larger rank_runouts AND
-# hands together (see DEFAULT_RANK_RUNOUTS's comment and
-# task-13-report.md), which this box's 2.5s PLO6 budget does not afford.
-# What DID improve over the old single-pass grid: the spread is no longer
-# lopsided toward the tight buckets (old grid: 15% at 0.76pp vs 100% at
-# 0.11pp, a ~7x gap) -- here the tightest and widest buckets are within
-# about 4x of each other, and several mid buckets (40%, 60%) sit close to
-# the 1pp line.
+# machine -- see git history / task-12-report.md). That 2.5s-budget sweep
+# (hands=10,000/rank_runouts=300/trials_per_bucket in {30k,50k,80k}) found
+# 80k already down to 5.1% headroom (too tight) and 50k the largest
+# candidate with real margin -- see task-13-report.md for that sweep's
+# full numbers, since read on their own they describe the ORIGINAL 2.5s
+# operating point, not the current one.
 DEFAULT_TRIALS_PER_BUCKET = 50_000
 
 # Task 10: worker count for the persistent process pool (see
