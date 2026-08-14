@@ -73,7 +73,27 @@ def _ladder(**kw):
 
 
 def test_equity_is_monotonic_in_bucket_width():
-    """A dip means the ranking is inverted or the slices are wrong."""
+    """NOT a general property of this feature -- see Task 13 fix-round-2
+    Finding 3. Task 13's hand ranking means equity vs. bucket B is not
+    guaranteed non-decreasing in B even with unlimited samples: a hero's
+    made hand can have disproportionate redraw equity against villains
+    that rank only moderately by population strength, so real (small,
+    reproducible) dips exist at the shipped defaults for ordinary heroes
+    (see range_ladder.py's compute_range_ladder docstring for a measured
+    example). A dip there would NOT mean the ranking is inverted or the
+    slices are wrong.
+
+    This assertion is still meaningful HERE, and only here, because the
+    fixture below makes "nuts" *provably* unbeatable (equity exactly 1.0
+    against every villain on every runout, by construction -- see the
+    fixture comment above), not just usually strong. A perfectly flat 1.0
+    line cannot dip, so a failure on `nuts` really would mean the pipeline
+    is broken (ranking inverted, slices misapplied, wrong hero scored --
+    not the structural non-monotonicity Finding 3 describes). "air" was
+    separately confirmed monotonic across 10 independent seeds (see above)
+    for the same reason `nuts` is guaranteed to be: it is nowhere near a
+    strong hand's own redraw-equity regime on this board.
+    """
     out = _ladder()
     for lad in out["ladders"]:
         eq = [r["equity"] for r in lad["rungs"]]

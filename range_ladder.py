@@ -16,6 +16,11 @@ sample differently, because ranking and equity want opposite things:
   Sharing runouts here (as Task 11 effectively did, by ranking trials
   instead of hands) correlates every villain's outcome and was the direct
   cause of 5-7pp of noise surviving even at the whole-population bucket.
+  ON THE RIVER there is no runout left to draw, so Pass 2 skips sampling
+  entirely and enumerates each bucket's full membership exactly once
+  instead (see `compute_range_ladder`) -- a river bucket's equity is a
+  finite, exactly computable average, not something to add sampling noise
+  to just because that's what the other two streets do.
 
 Task 11's design ranked the 10,000 TRIALS by the villain's hand rank on
 its OWN completed board -- that ranks scenarios (a weak hand on a lucky
@@ -289,13 +294,17 @@ def eligible_mask(hands, runout):
     """False for hands holding a card that `runout` also uses.
 
     Those pairings are impossible and must never be scored. Pass 1's
-    shared runouts are drawn BEFORE the villain hands, so a runout can
-    legally hold a card a given villain hand also holds -- unlike Pass 2,
-    where the runout is drawn after (and explicitly excludes) the
-    villain's cards, so no collision is possible there by construction.
-    Skipping an ineligible (hand, runout) pair here and averaging each
-    hand only over the runouts it IS eligible for is the correct
-    conditional distribution -- unbiased, not an approximation.
+    runouts are SHARED across every villain hand -- one runout is scored
+    against the whole population, so it can legally hold a card any given
+    hand also holds -- unlike Pass 2, where each runout is drawn AFTER its
+    own trial's villain and explicitly excludes that villain's cards, so no
+    collision is possible there by construction. (Draw order alone is not
+    the reason: Pass 1 draws villains before runouts too -- see
+    compute_range_ladder -- but that draw order is irrelevant here, because
+    the runout is shared rather than being generated per-hand.) Skipping an
+    ineligible (hand, runout) pair here and averaging each hand only over
+    the runouts it IS eligible for is the correct conditional distribution
+    -- unbiased, not an approximation.
     """
     if runout.size == 0:
         return np.ones(hands.shape[0], dtype=bool)
@@ -469,6 +478,20 @@ def rank_hands(villain_hands, board_ints, runouts, game, score_array,
         # .result() in chunk-submission order, not as_completed(): the
         # concatenation below must reassemble runouts in a fixed order
         # regardless of which worker finishes first.
+        #
+        # Memory note: `scores` alone is a (rank_runouts, hands) float64
+        # matrix -- at the shipped defaults (rank_runouts=300,
+        # hands=60,000) that is ~144MB, and np.concatenate below
+        # transiently holds both the per-chunk partials AND the assembled
+        # whole at once (plus another ~144MB for `eligible`, a same-shape
+        # bool array), so parallel dispatch briefly doubles that. This is
+        # a deliberate price for bit-exactness across worker counts (see
+        # rank_hands' docstring and the module docstring): concatenating
+        # full per-chunk matrices and reducing ONCE, serially, afterward
+        # is what makes the reduction's summation order independent of how
+        # many workers ran -- summing partial beat_sum/beat_cnt per chunk
+        # instead would be cheaper in memory but would reintroduce the
+        # float-non-associativity problem Task 10's design had.
         partials = [f.result() for f in futures]
         scores = np.concatenate([p[0] for p in partials], axis=0)
         eligible = np.concatenate([p[1] for p in partials], axis=0)
@@ -503,10 +526,13 @@ def sample_pass2_trials(deck, board_len, hole_count, villain_hands, bucket_indic
     the `need` lowest-keyed columns, so a masked column can only be chosen
     if fewer than `need` unmasked columns remain -- never true for a real
     deck. This is the structural guarantee behind "Pass 2 has no
-    collisions": the runout is drawn AFTER the villain and explicitly
-    excludes its cards, unlike Pass 1's shared runouts (drawn before any
-    villain, so a collision is possible there and must be masked out by
-    `eligible_mask` instead).
+    collisions": each row's runout is drawn knowing THAT row's own villain
+    and explicitly excludes its cards -- unlike Pass 1's shared runouts,
+    which are scored against every villain hand in the whole population
+    (not generated per-hand), so a collision is possible there and must be
+    masked out by `eligible_mask` instead. (It is the sharing, not draw
+    order, that makes Pass 1 collision-prone: compute_range_ladder draws
+    Pass 1's villains before its runouts too.)
     """
     deck_arr = np.asarray(deck, dtype=np.int32)
     total = deck_arr.size
@@ -721,9 +747,32 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     """The whole feature: hero equity vs board-strength percentile slices.
 
     Two passes (see the module docstring): Pass 1 (`hands` x `rank_runouts`)
-    ranks villain hands on shared runouts; Pass 2 (`trials_per_bucket` per
-    bucket, `len(buckets)` buckets) measures each hero's equity against
-    each bucket on fresh, independent, per-trial runouts.
+    ranks villain hands on shared runouts; Pass 2 measures each hero's
+    equity against each bucket. Off the river, Pass 2 draws
+    `trials_per_bucket` independent trials per bucket on fresh, independent,
+    per-trial runouts (sampling, since a runout still has to be drawn and
+    completed). ON the river the board is already complete, so a bucket's
+    equity is a finite, exactly computable quantity: Pass 2 instead scores
+    every member of the bucket exactly once (no runout, no sampling, no
+    `trials_per_bucket` draws with replacement) and averages that -- see
+    Finding 1 of the Task 13 fix-round-2 review: the old code sampled WITH
+    REPLACEMENT from bucket members even on the river, which left a river
+    ladder claiming `exact: True` while its bucket-5 equity still moved
+    ~14.6pp seed to seed. `exact` in the response is True only when this
+    exact-enumeration path ran, i.e. only on the river.
+
+    Equity is generally NOT monotonically non-decreasing in bucket width
+    (a wider bucket does not always mean at least as much hero equity).
+    Task 11's scenario ranking made monotonicity near-automatic (a lucky
+    scenario for a weak hand inflated a tight bucket, biasing it upward);
+    Task 13's hand ranking removed that artifact, so a real, small dip can
+    now surface -- e.g. a hero's made flush is only beaten by hands that
+    fill up on the runout, and made-hand density is not itself monotonic
+    in villain population rank. A dip of a few percentage points,
+    reproducible across seeds, is expected and is NOT by itself evidence
+    of a ranking or slicing bug -- see task-13-report.md's fix-round-2
+    addendum for a measured example (PLO6, shipped defaults: [0.825,
+    0.886, 0.852, 0.844, 0.839, 0.871], a 3.4pp dip at bucket 25%).
 
     `parallel`/`num_workers` pass straight through to both rank_hands and
     evaluate_pass2 (see their docstrings); left at their defaults, sizing
@@ -733,7 +782,10 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
 
     See spec Section 5 for the response shape; `rank_runouts` and
     `trials_per_bucket` are additionally reported so the sampling effort
-    behind each number is visible (see task-13-brief.md).
+    behind each number is visible (see task-13-brief.md). On the river,
+    `trials_per_bucket` still echoes the input parameter for shape
+    stability even though Pass 2 does not actually use it to sample (see
+    above) -- it describes the request, not what Pass 2 did with it.
     """
     board_ints = hand_str_to_ints(board)
     board_len = len(board_ints)
@@ -814,19 +866,41 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
         strength, villain_hands, buckets_list, board_ints, rank_runouts_arr,
     )
 
-    # --- Pass 2: stratified hero equity on independent runouts ---
-    trials_arr = sample_pass2_trials(
-        deck, board_len, hole_count, villain_hands, bucket_indices,
-        trials_per_bucket, rng,
-    )
+    # --- Pass 2: hero equity per bucket ---
+    if board_len == 5:
+        # River: no runout to draw -- the board is already complete, so a
+        # bucket's hero equity is a finite, EXACTLY computable quantity
+        # (score hero against EVERY member of the bucket once, then
+        # average), not something to draw `trials_per_bucket` samples WITH
+        # REPLACEMENT for. Fix round 2, Finding 1: the old code sampled
+        # with replacement here too, which left an `exact: True` river
+        # ladder whose bucket-5 equity still moved seed to seed. Each
+        # bucket's block is that bucket's own full (cumulative) membership
+        # -- block sizes differ per bucket (they nest: bucket 100% is 20x
+        # bucket 5%), so `block_sizes` records them for the per-bucket
+        # mean below instead of assuming a uniform trials_per_bucket block.
+        block_sizes = [idx.size for idx in bucket_indices]
+        trials_arr = np.concatenate(
+            [villain_hands[idx] for idx in bucket_indices], axis=0
+        ).astype(np.int32)
+    else:
+        block_sizes = [trials_per_bucket] * len(buckets_list)
+        trials_arr = sample_pass2_trials(
+            deck, board_len, hole_count, villain_hands, bucket_indices,
+            trials_per_bucket, rng,
+        )
+
     _villain_scores, hero_results = evaluate_pass2(
         trials_arr, hero_arrays, board_ints, hole_count, game, score_array,
         parallel=parallel, num_workers=num_workers,
     )
 
     h = hero_arrays.shape[0]
-    b = len(buckets_list)
-    equity = hero_results.reshape(h, b, trials_per_bucket).mean(axis=2)
+    equity = np.empty((h, len(buckets_list)), dtype=np.float64)
+    start = 0
+    for i, size in enumerate(block_sizes):
+        equity[:, i] = hero_results[:, start:start + size].mean(axis=1)
+        start += size
 
     ladders = []
     for j, hero in enumerate(heroes):

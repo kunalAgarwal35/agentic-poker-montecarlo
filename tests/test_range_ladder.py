@@ -2,7 +2,7 @@ from itertools import combinations
 
 import numpy as np
 import pytest
-from card_encoding import hand_str_to_ints, generate_deck_ints
+from card_encoding import hand_str_to_ints, ints_to_hand_str, generate_deck_ints
 from hand_rank_evaluator import get_score_array
 from range_ladder import (
     sample_villains,
@@ -379,6 +379,54 @@ def test_river_ladder_is_exact_and_monotonic():
     # boundary hands are shared -- ranking is hero-independent
     assert [r["edge"]["cards"] for r in nuts] == [r["edge"]["cards"] for r in air]
     assert [r["edge"]["category"] for r in nuts] == [r["edge"]["category"] for r in air]
+
+
+def test_river_ladder_is_identical_across_seeds_when_population_is_exhaustive():
+    # Fix round 2, Finding 1: on the river Pass 2 must enumerate each
+    # bucket's full membership exactly once (no sampling with replacement,
+    # no rng draws at all), so equity is exact given a fixed Pass-1
+    # population. Pass 1's OWN population (`sample_villains`) is normally a
+    # random subsample and would still vary by seed, which would leave
+    # this test unable to isolate Pass 2's contribution -- so this fixture
+    # shrinks the remaining deck small enough that the requested `hands`
+    # exceeds the total combinatorial space, forcing sample_villains' own
+    # EXHAUSTIVE-enumeration branch (which never touches `rng`). Pass 1
+    # ranking is also exact on the river (a single, empty completion -- no
+    # runout sampling either). With population, ranking AND (after the
+    # fix) equity all seed-independent, the two calls below -- identical
+    # inputs except `seed` -- must produce byte-identical output. Before
+    # the fix, this would have failed: old Pass 2 drew
+    # `rng.integers(...)` picks that differed by seed even though nothing
+    # upstream of it did.
+    board = "6s7s4s2h9d"
+    nuts = "AsKs9h2c"
+    air = "3dTc5s8h"
+    used = {board[i:i + 2] for i in range(0, len(board), 2)}
+    used |= {nuts[i:i + 2] for i in range(0, len(nuts), 2)}
+    used |= {air[i:i + 2] for i in range(0, len(air), 2)}
+    full_deck = ints_to_hand_str(generate_deck_ints([]))
+    remaining = [full_deck[i:i + 2] for i in range(0, len(full_deck), 2)
+                if full_deck[i:i + 2] not in used]
+    # Keep only 12 cards live (C(12,4) = 495 << hands=2000, so
+    # sample_villains hits its exhaustive branch); the rest becomes a
+    # third `dead` blocker entry so the deck shrinks accordingly.
+    keep, blocker_cards = remaining[:12], remaining[12:]
+    dead = [nuts, air, "".join(blocker_cards)]
+    heroes = [{"id": "nuts", "cards": nuts}, {"id": "air", "cards": air}]
+
+    kw = dict(board=board, dead=dead, heroes=heroes,
+             hands=2000, rank_runouts=10, trials_per_bucket=500)
+    out_a = compute_range_ladder(seed=1, **kw)
+    out_b = compute_range_ladder(seed=2, **kw)
+
+    assert out_a["exact"] is True
+    assert out_a["population"] == out_b["population"]
+    for lad_a, lad_b in zip(out_a["ladders"], out_b["ladders"]):
+        assert lad_a["id"] == lad_b["id"]
+        for rung_a, rung_b in zip(lad_a["rungs"], lad_b["rungs"]):
+            assert rung_a["equity"] == rung_b["equity"]
+            assert rung_a["edge"]["cards"] == rung_b["edge"]["cards"]
+            assert rung_a["edge"]["category"] == rung_b["edge"]["category"]
 
 
 def test_flop_ladder_reports_the_requested_rank_runouts():
