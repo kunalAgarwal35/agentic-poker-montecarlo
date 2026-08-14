@@ -172,6 +172,33 @@ DEFAULT_POOL_WORKERS = os.cpu_count() or 4
 # line or the other -- see task-10-report.md.
 _PARALLEL_MIN_EVALS = 4000
 
+# Rows per chunk of `sample_pass2_trials`' runout draw. Purely a memory
+# knob: the drawn cards are BIT-IDENTICAL to the old single-allocation
+# version at every chunk size, because
+#
+#   (a) `Generator.random((r, total))` fills its output in C order from one
+#       flat stream of doubles, so drawing (r1+r2, total) in one call and
+#       drawing (r1, total) then (r2, total) consume the same doubles in the
+#       same positions -- chunking splits the stream, it does not reorder or
+#       skip any of it; and
+#   (b) everything downstream of the keys (the collision mask, the +inf
+#       masking, the per-row argsort) is computed row by row and never looks
+#       across rows, so a row's runout depends only on its own keys.
+#
+# Verified, not assumed: `sample_pass2_trials`' full output hashes
+# identically before and after this change for 7 fixtures (5 flop seeds,
+# 2 turn seeds), and tests/test_range_ladder.py pins the same property.
+#
+# The value trades peak memory against loop overhead. At the endpoint's
+# accepted maximum (600,000 rows, 45-card deck) the un-chunked version
+# peaked at 512MB for a 14MB result (tracemalloc) -- every default
+# off-river request paid that spike on a box server.py itself calls small,
+# and concurrent requests multiplied it. 20,000 rows caps the transient
+# working set at roughly 20MB regardless of how many trials were asked
+# for, at 30 iterations for that same maximum -- overhead that does not
+# register against the scoring pass that follows.
+_PASS2_DRAW_CHUNK_ROWS = 20_000
+
 # hand_categories.CATEGORY_TOKENS is index-aligned (low -> high strength) with
 # the category_array.npy lookup used below, so mapping through it keeps this
 # module's labels in lockstep with the engine's own naming (PQL's
@@ -617,6 +644,13 @@ def sample_pass2_trials(deck, board_len, hole_count, villain_hands, bucket_indic
     masked out by `eligible_mask` instead. (It is the sharing, not draw
     order, that makes Pass 1 collision-prone: compute_range_ladder draws
     Pass 1's villains before its runouts too.)
+
+    The runout draw runs in ROW CHUNKS of `_PASS2_DRAW_CHUNK_ROWS`. That is
+    a pure memory measure and changes NOTHING about which cards are drawn
+    (see that constant's comment for why the stream is identical); it exists
+    because the dense (trials, deck) key matrix, its masked copy and its
+    int64 argsort together peaked at 512MB for a 14MB result at parameters
+    the endpoint accepts by default -- final review, Finding 8.
     """
     deck_arr = np.asarray(deck, dtype=np.int32)
     total = deck_arr.size
@@ -633,13 +667,19 @@ def sample_pass2_trials(deck, board_len, hole_count, villain_hands, bucket_indic
         runouts = np.empty((villains_trial.shape[0], 0), dtype=np.int32)
         return np.concatenate([villains_trial, runouts], axis=1).astype(np.int32)
 
-    keys = rng.random((villains_trial.shape[0], total))
-    collide = np.zeros((villains_trial.shape[0], total), dtype=bool)
-    for k in range(hole_count):
-        collide |= (villains_trial[:, k:k + 1] == deck_arr[None, :])
-    keys = np.where(collide, np.inf, keys)
-    order = keys.argsort(axis=1)[:, :need]
-    runouts = deck_arr[order].astype(np.int32)
+    rows = villains_trial.shape[0]
+    runouts = np.empty((rows, need), dtype=np.int32)
+    for start in range(0, rows, _PASS2_DRAW_CHUNK_ROWS):
+        stop = min(start + _PASS2_DRAW_CHUNK_ROWS, rows)
+        block = villains_trial[start:stop]
+        keys = rng.random((stop - start, total))
+        collide = np.zeros((stop - start, total), dtype=bool)
+        for k in range(hole_count):
+            collide |= (block[:, k:k + 1] == deck_arr[None, :])
+        # In place, not np.where: same values, one fewer full-size copy.
+        keys[collide] = np.inf
+        order = keys.argsort(axis=1)[:, :need]
+        runouts[start:stop] = deck_arr[order]
 
     return np.concatenate([villains_trial, runouts], axis=1).astype(np.int32)
 

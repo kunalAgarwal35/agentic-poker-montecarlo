@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 from card_encoding import hand_str_to_ints, ints_to_hand_str, generate_deck_ints
 from hand_rank_evaluator import get_score_array
+import range_ladder
 from range_ladder import (
     sample_villains,
     sample_runouts,
@@ -275,6 +276,35 @@ def test_sample_pass2_trials_is_seed_deterministic():
     b = sample_pass2_trials(deck, 3, 4, villain_hands, bucket_indices, 200,
                             np.random.default_rng(9))
     assert np.array_equal(a, b)
+
+
+def test_sample_pass2_trials_draw_is_independent_of_the_chunk_size(monkeypatch):
+    # Final review, Finding 8: the runout draw materialised a dense
+    # (trials, deck) float64 key matrix, a masked copy of it and an int64
+    # argsort of it, peaking at 512MB (tracemalloc) for a 14MB result at
+    # parameters the endpoint accepts by DEFAULT. It now draws in row
+    # chunks, which is only acceptable if it changes nothing about the
+    # numbers drawn -- determinism and bit-exactness outrank memory here.
+    #
+    # `Generator.random((r, total))` fills its output in C order from one
+    # flat stream of doubles, and every step after it is per-row, so the
+    # chunk size must be invisible in the output. This pins that directly:
+    # one chunk covering everything, a chunk size that does not divide the
+    # row count evenly, and a pathological chunk of 1 row must all produce
+    # the SAME array, byte for byte.
+    deck = generate_deck_ints(["6s", "7s", "4s"])
+    villain_hands = sample_villains(deck, 4, 120, np.random.default_rng(1))
+    bucket_indices = [np.arange(0, 6), np.arange(0, 120)]
+
+    def draw(chunk_rows):
+        monkeypatch.setattr(range_ladder, "_PASS2_DRAW_CHUNK_ROWS", chunk_rows)
+        return sample_pass2_trials(deck, 3, 4, villain_hands, bucket_indices,
+                                   350, np.random.default_rng(9))
+
+    whole = draw(10 ** 9)          # single chunk == the pre-change code path
+    assert whole.shape[0] == 700
+    for chunk_rows in (350, 333, 128, 7, 1):
+        assert np.array_equal(draw(chunk_rows), whole), chunk_rows
 
 
 def test_evaluate_pass2_scores_every_row_on_its_own_completed_board():
