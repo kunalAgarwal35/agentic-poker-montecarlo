@@ -61,8 +61,19 @@ def _clamp_hands(raw):
     past a tradeoff the user made on purpose, not just spike load. A
     caller may always ask for FEWER hands (a faster, noisier read);
     asking for more than the tuned default is not something a per-request
-    override should be able to grant."""
-    return max(100, min(int(raw or DEFAULT_HANDS), DEFAULT_HANDS))
+    override should be able to grant.
+
+    Absent/None (key omitted, or explicit `null`) is treated as "use the
+    default" -- but a literal `0` (or `"0"`) is a caller-supplied value and
+    must clamp DOWN to the floor, not silently jump to the ceiling. `raw or
+    DEFAULT_HANDS` got this backwards (0 is falsy, so it fell through to
+    the default -- the single MOST expensive value, for a caller who
+    plainly asked for the least) and disagreed with itself between int 0
+    and string "0" (only the int short-circuited); checking `is None`
+    explicitly fixes both."""
+    if raw is None:
+        return DEFAULT_HANDS
+    return max(100, min(int(raw), DEFAULT_HANDS))
 
 
 def _clamp_rank_runouts(raw):
@@ -74,8 +85,14 @@ def _clamp_rank_runouts(raw):
     (300) -- range_ladder.py's DEFAULT_RANK_RUNOUTS comment records that
     300 was already chosen as the point past which spending more of the
     time budget here stopped being worth it relative to spending it on
-    `hands` instead."""
-    return max(5, min(int(raw or DEFAULT_RANK_RUNOUTS), DEFAULT_RANK_RUNOUTS))
+    `hands` instead.
+
+    Same absent-vs-zero fix as `_clamp_hands`: only `None` (key omitted or
+    explicit `null`) falls back to the default; a literal 0 clamps to the
+    floor instead."""
+    if raw is None:
+        return DEFAULT_RANK_RUNOUTS
+    return max(5, min(int(raw), DEFAULT_RANK_RUNOUTS))
 
 
 def _clamp_trials_per_bucket(raw):
@@ -86,8 +103,24 @@ def _clamp_trials_per_bucket(raw):
     the value range_ladder.py's DEFAULT_TRIALS_PER_BUCKET comment measured
     as already inside the ~5-6s budget with real headroom on a loaded
     machine -- the same "the shipped default is the tuned ceiling, not a
-    suggestion" reasoning as `_clamp_hands`."""
-    return max(50, min(int(raw or DEFAULT_TRIALS_PER_BUCKET), DEFAULT_TRIALS_PER_BUCKET))
+    suggestion" reasoning as `_clamp_hands`.
+
+    Same absent-vs-zero fix as `_clamp_hands`: only `None` (key omitted or
+    explicit `null`) falls back to the default; a literal 0 clamps to the
+    floor instead."""
+    if raw is None:
+        return DEFAULT_TRIALS_PER_BUCKET
+    return max(50, min(int(raw), DEFAULT_TRIALS_PER_BUCKET))
+
+
+# Pass-2 cost is trials_per_bucket x len(buckets) x (1 + len(heroes)) -- unlike
+# hands/rank_runouts/trials_per_bucket above, heroes and buckets are rejected
+# outright rather than silently clamped: quietly dropping a caller's 11th hero
+# or 13th bucket would return an answer to a question they didn't ask, where a
+# quietly-smaller `hands` is still an honest (if noisier) answer to the same
+# question.
+MAX_HEROES = 10
+MAX_BUCKETS = 12
 
 # One-time numba JIT warmup, kicked off by the first /health hit. Guarded by a
 # module-level bool so we only ever start the daemon thread once.
@@ -267,6 +300,14 @@ def range_ladder_endpoint():
     already-tuned default (see the _clamp_* helpers above). There is no
     timeout here: a slow response is the honest cost of this computation,
     not something to truncate into a wrong (partial) answer.
+
+    `heroes` (1..MAX_HEROES) and `buckets` (1..MAX_BUCKETS, when provided)
+    are REJECTED (400) rather than clamped when out of range -- Pass-2
+    cost is trials_per_bucket x len(buckets) x (1 + len(heroes)), so both
+    multiply cost the same way hands/rank_runouts/trials_per_bucket do,
+    but silently dropping a caller's 11th hero or 13th bucket would answer
+    a different, smaller question than the one asked instead of just
+    answering it more cheaply/noisily.
     """
     if not _engine_authorized():
         return jsonify({"error": "unauthorized"}), 401
@@ -276,6 +317,24 @@ def range_ladder_endpoint():
     heroes = data.get('heroes')
     if not board or not heroes:
         return jsonify({"error": "Missing required field: board and heroes"}), 400
+    if len(heroes) > MAX_HEROES:
+        return jsonify({
+            "error": "Too many heroes",
+            "details": f"at most {MAX_HEROES} heroes per request, got {len(heroes)}",
+        }), 400
+
+    buckets_raw = data.get('buckets')
+    if buckets_raw is None:
+        buckets = tuple(DEFAULT_BUCKETS)
+    elif len(buckets_raw) == 0:
+        return jsonify({"error": "`buckets` must not be empty"}), 400
+    elif len(buckets_raw) > MAX_BUCKETS:
+        return jsonify({
+            "error": "Too many buckets",
+            "details": f"at most {MAX_BUCKETS} buckets per request, got {len(buckets_raw)}",
+        }), 400
+    else:
+        buckets = tuple(buckets_raw)
 
     seed = data.get('seed')
     if seed is not None:
@@ -286,7 +345,7 @@ def range_ladder_endpoint():
             board=board,
             dead=data.get('dead') or [],
             heroes=heroes,
-            buckets=tuple(data.get('buckets') or DEFAULT_BUCKETS),
+            buckets=buckets,
             hands=_clamp_hands(data.get('hands')),
             rank_runouts=_clamp_rank_runouts(data.get('rank_runouts')),
             trials_per_bucket=_clamp_trials_per_bucket(data.get('trials_per_bucket')),
