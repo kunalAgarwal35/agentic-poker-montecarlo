@@ -28,9 +28,15 @@ from range_ladder import (
 #
 # ("air" is monotonic in every trial -- only "nuts" dips.) Investigation
 # (see task-7-report.md) ruled out the three implementation bugs the brief
-# names as likely causes: `evaluate_population`'s beat_cnt/hero_sum indexing
-# is aligned (verified by inspection), `build_rungs` sorts `-strength`
-# (strongest first, correct), and `take` never rounds to 0 at n~=3000. It
+# names as likely causes: the ranking reduction's beat_sum/beat_cnt indexing
+# is aligned (verified by inspection), the bucket slicer sorts `-strength`
+# (strongest first, correct), and `take` never rounds to 0 at n~=3000. (That
+# investigation predates Task 13's two-pass rewrite, so it names symbols
+# that no longer exist: `evaluate_population` is now `rank_hands` +
+# `_reduce_rank_scores`, which keeps beat_sum/beat_cnt but has no
+# `hero_sum` at all, and the sort moved from `build_rungs` into
+# `_bucket_slices_and_edges`. The conclusion still holds; the names are
+# corrected here per final review, Finding 9.) It
 # also ruled out plain Monte Carlo noise: holding the fixture's cards fixed
 # and increasing hands/runouts by 10x (3000/300 -> 30000/2000) does not
 # shrink the dip below ~0.3-3.4 percentage points; it is not a 1/sqrt(N)

@@ -565,8 +565,10 @@ def rank_hands(villain_hands, board_ints, runouts, game, score_array,
         # matrix -- at the shipped defaults (rank_runouts=300,
         # hands=60,000) that is ~144MB, and np.concatenate below
         # transiently holds both the per-chunk partials AND the assembled
-        # whole at once (plus another ~144MB for `eligible`, a same-shape
-        # bool array), so parallel dispatch briefly doubles that. This is
+        # whole at once (plus ~18MB for `eligible` -- a same-SHAPE bool
+        # array, but np.bool_ is 1 byte per element, not 8, so an eighth of
+        # `scores`, not another 144MB as this comment used to claim), so
+        # parallel dispatch briefly doubles that. This is
         # a deliberate price for bit-exactness across worker counts (see
         # rank_hands' docstring and the module docstring): concatenating
         # full per-chunk matrices and reducing ONCE, serially, afterward

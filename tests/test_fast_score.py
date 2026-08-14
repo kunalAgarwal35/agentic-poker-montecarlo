@@ -25,6 +25,18 @@ pytestmark = pytest.mark.skipif(
 SCORE_ARRAY = get_score_array()
 GAMES = [("plo4", 4), ("plo5", 5), ("plo6", 6)]
 
+# Fixed literal seeds, one per random-input test below. These used to be
+# `abs(hash((game, n))) % 2**32`, but Python randomises string hashing per
+# process (three interpreters produced 3410057940 / 4015792210 / 1094733947
+# for the same tuple), so every session ran these parity checks on different
+# inputs and a failure could not be reproduced from the test source -- final
+# review, Finding 6. The same seed across the parametrised games/board
+# lengths is deliberate: the shapes already differ, and holding the draw
+# fixed makes a failure comparable across them.
+SEED_KERNEL_RANDOM_SAMPLE = 1_000_001
+SEED_SCORE_HANDS = 1_000_002
+SEED_HERO_TILE = 1_000_003
+
 
 def _sample_joint(deck, hole_count, board_len, trials, rng):
     """Local stand-in for Task 11's deleted `sample_trials`: `trials` joint
@@ -62,7 +74,7 @@ def _random_hands_and_boards(rng, num_cards, n):
 @pytest.mark.parametrize("game,num_cards", GAMES)
 @pytest.mark.parametrize("n", [50, 4321])  # 4321: not a multiple of chunk=2000
 def test_kernel_matches_numpy_random_sample(game, num_cards, n):
-    rng = np.random.default_rng(abs(hash((game, n))) % (2 ** 32))
+    rng = np.random.default_rng(SEED_KERNEL_RANDOM_SAMPLE)
     hands, boards = _random_hands_and_boards(rng, num_cards, n)
     hand_combos = _HAND_COMBOS[game]
 
@@ -106,8 +118,8 @@ def test_kernel_matches_numpy_n_equals_one(game, num_cards):
 
 def test_kernel_sorts_five_cards_identically_to_numpy_sort():
     # Ties are impossible (cards within a row are always distinct -- see
-    # sample_trials/compute_range_ladder), so there is exactly one correct
-    # ascending permutation for any 5 distinct cards; this checks the
+    # `_sample_joint` above and compute_range_ladder), so there is exactly
+    # one correct ascending permutation for any 5 distinct cards; this checks the
     # kernel's insertion sort finds it -- and that the resulting
     # combinatorial index matches the numpy path's -- for all 5! = 120
     # orderings a row could arrive in, not just "typical" already-mostly-
@@ -142,7 +154,7 @@ def test_kernel_sorts_five_cards_identically_to_numpy_sort():
 @pytest.mark.parametrize("game,num_cards", GAMES)
 @pytest.mark.parametrize("board_len", [3, 4, 5])  # flop, turn, river
 def test_score_hands_numba_matches_numpy(game, num_cards, board_len):
-    rng = np.random.default_rng(abs(hash((game, board_len))) % (2 ** 32))
+    rng = np.random.default_rng(SEED_SCORE_HANDS)
     deck = generate_deck_ints(["As", "Ks"])  # arbitrary fixed removed cards
     board_ints = deck[:board_len]
     remaining_deck = deck[board_len:]
@@ -167,7 +179,7 @@ def test_score_hands_numba_matches_numpy(game, num_cards, board_len):
 
 @pytest.mark.parametrize("game,num_cards", GAMES)
 def test_score_hands_numba_matches_numpy_broadcast_hero_tile(game, num_cards):
-    # Mirrors range_ladder._evaluate_trials_chunk's hero-side call exactly:
+    # Mirrors range_ladder._evaluate_pass2_chunk's hero-side call exactly:
     # a single hero hand broadcast (stride-0) across every trial row.
     #
     # The combinatorial-number-system index (both here and in production)
@@ -180,7 +192,7 @@ def test_score_hands_numba_matches_numpy_broadcast_hero_tile(game, num_cards):
     # keeping hero cards out of the trial-sampling deck entirely (they're
     # part of `dead`); this fixture reproduces that same guarantee by
     # construction, using three disjoint slices of the 52-card deck.
-    rng = np.random.default_rng(abs(hash(("hero", game))) % (2 ** 32))
+    rng = np.random.default_rng(SEED_HERO_TILE)
     full = np.arange(52, dtype=np.int32)
     hero = full[:num_cards]
     board_ints = full[num_cards:num_cards + 3]
