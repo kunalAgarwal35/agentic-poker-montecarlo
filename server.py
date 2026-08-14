@@ -338,7 +338,20 @@ def range_ladder_endpoint():
 
     seed = data.get('seed')
     if seed is not None:
-        seed = int(seed)
+        # Coerced -- and rejected -- OUTSIDE the try/except below on purpose:
+        # compute_range_ladder itself raises ValueError for bad card/board
+        # input, which that block maps to 422. A non-numeric seed is a
+        # different kind of caller error (a malformed field, not input the
+        # computation examined and rejected) and must stay a distinguishable
+        # 400, not get relabeled 422 "Invalid input" alongside genuine
+        # card-validation failures.
+        try:
+            seed = int(seed)
+        except (TypeError, ValueError):
+            return jsonify({
+                "error": "Invalid input",
+                "details": f"`seed` must be an integer, got {seed!r}",
+            }), 400
 
     try:
         result = compute_range_ladder(

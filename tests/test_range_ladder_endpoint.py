@@ -279,3 +279,38 @@ def test_exactly_max_heroes_still_succeeds():
     assert resp.status_code == 200, resp.get_data(as_text=True)
     body = resp.get_json()
     assert len(body["ladders"]) == MAX_HEROES
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 follow-up: `int(seed)` sat outside the try/except, so a
+# non-numeric `seed` raised an uncaught ValueError/TypeError -- Flask turned
+# that into a bare, unlogged 500 for what is plainly a caller error. Fixed
+# to return 400 (distinguishable from compute_range_ladder's own ValueError,
+# which this route maps to 422).
+# ---------------------------------------------------------------------------
+
+def test_non_numeric_seed_is_a_400_not_a_500_or_422():
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s",
+        "dead": ["AsKs9h2c"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "hands": 100, "rank_runouts": 5, "trials_per_bucket": 50,
+        "seed": "abc",
+    })
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+def test_string_seed_still_works_and_matches_integer_seed():
+    payload = {
+        "board": "6s7s4s",
+        "dead": ["AsKs9h2c"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "hands": 300, "rank_runouts": 10, "trials_per_bucket": 100,
+    }
+    resp_int = client.post("/range_ladder", json={**payload, "seed": 7})
+    resp_str = client.post("/range_ladder", json={**payload, "seed": "7"})
+    assert resp_int.status_code == 200, resp_int.get_data(as_text=True)
+    assert resp_str.status_code == 200, resp_str.get_data(as_text=True)
+    # Determinism must not depend on which JSON type the caller sent the
+    # seed as -- same seed value in, same ladder out.
+    assert resp_int.get_json() == resp_str.get_json()
