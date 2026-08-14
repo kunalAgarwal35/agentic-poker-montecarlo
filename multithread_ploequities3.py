@@ -14,41 +14,22 @@ import os
 # from line_profiler_pycharm import profile
 
 # ============= GLOBAL PROCESS POOL (PERSISTENT WORKERS) =============
-# This eliminates the ~5 second overhead of creating processes per request
-_GLOBAL_EXECUTOR = None
-_DEFAULT_WORKERS = 4  # Match server core count
-
-def get_global_executor(num_workers=None):
-    """Get or create a persistent ProcessPoolExecutor."""
-    global _GLOBAL_EXECUTOR
-    if _GLOBAL_EXECUTOR is None:
-        workers = num_workers or _DEFAULT_WORKERS
-        print(f"[ProcessPool] Initializing global executor with {workers} workers...")
-        _GLOBAL_EXECUTOR = ProcessPoolExecutor(max_workers=workers)
-        atexit.register(shutdown_executor)
-        print(f"[ProcessPool] Global executor ready (PID: {os.getpid()})")
-    return _GLOBAL_EXECUTOR
-
-def shutdown_executor():
-    """Cleanup function called at exit."""
-    global _GLOBAL_EXECUTOR
-    if _GLOBAL_EXECUTOR is not None:
-        print("[ProcessPool] Shutting down global executor...")
-        _GLOBAL_EXECUTOR.shutdown(wait=True)
-        _GLOBAL_EXECUTOR = None
-
-def _dummy_warmup_task():
-    """Simple task used to warm up process pool workers."""
-    return 1
-
-def warmup_executor():
-    """Pre-warm the executor by running a dummy task on each worker."""
-    executor = get_global_executor()
-    # Submit dummy tasks to ensure all workers are spawned
-    futures = [executor.submit(_dummy_warmup_task) for _ in range(_DEFAULT_WORKERS)]
-    for f in futures:
-        f.result()
-    print("[ProcessPool] Workers warmed up and ready")
+# The pool now lives in process_pool.py and is re-exported here unchanged, so
+# every existing `from multithread_ploequities3 import get_global_executor`
+# keeps working and still gets THE SAME pool object.
+#
+# It was moved because importing this module to reach the pool also imports
+# pandas, and generating_list -> display_scenario -> cv2. range_ladder needs
+# the pool and none of that, and the deployed engine image ships neither
+# pandas nor OpenCV -- so the import chain, not the pool, was the problem.
+# See process_pool.py's docstring.
+from process_pool import (  # noqa: F401  (re-exported for existing callers)
+    get_global_executor,
+    shutdown_executor,
+    warmup_executor,
+    _dummy_warmup_task,
+    _DEFAULT_WORKERS,
+)
 # ====================================================================
 
 # ============= LOH25 CACHES (TOP 25% OPPONENT RANGES) =============

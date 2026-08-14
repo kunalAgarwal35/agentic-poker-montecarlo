@@ -21,14 +21,40 @@ from pql import run_pql
 from pql.graphs import equity_by_street, equity_distribution, equity_vs_class
 from pql.scenario import build_scenario
 from pql.parser.ast import Query
-from range_ladder import (
-    compute_range_ladder,
-    warmup_pool,
-    DEFAULT_BUCKETS,
-    DEFAULT_HANDS,
-    DEFAULT_RANK_RUNOUTS,
-    DEFAULT_TRIALS_PER_BUCKET,
-)
+
+# /range_ladder is imported defensively, and ONLY this endpoint is.
+#
+# The deployed image (see Dockerfile) COPYs a deliberately minimal file set, so
+# a module this server imports at top level can be absent from the container
+# even though every local test passes. That is not hypothetical: shipping
+# /range_ladder with a bare `from range_ladder import ...` and an unchanged
+# COPY list crashed the container on import and 502'd EVERY endpoint --
+# including /pql, which serves live traffic and has nothing to do with this
+# feature. The Dockerfile is the real fix and a test enforces it; this is the
+# blast-radius limiter, so the next such omission costs one endpoint and a loud
+# log line instead of the whole engine.
+#
+# Deliberately NOT applied to the /pql imports above: /pql IS the engine, so if
+# it cannot import there is no degraded mode worth serving and failing fast at
+# startup is the honest outcome.
+try:
+    from range_ladder import (
+        compute_range_ladder,
+        warmup_pool,
+        DEFAULT_BUCKETS,
+        DEFAULT_HANDS,
+        DEFAULT_RANK_RUNOUTS,
+        DEFAULT_TRIALS_PER_BUCKET,
+    )
+    RANGE_LADDER_IMPORT_ERROR = None
+except Exception as _e:  # pragma: no cover - exercised by the image test
+    RANGE_LADDER_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+    compute_range_ladder = None
+    DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
+    DEFAULT_HANDS = DEFAULT_RANK_RUNOUTS = DEFAULT_TRIALS_PER_BUCKET = 0
+
+    def warmup_pool():
+        return None
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -157,6 +183,13 @@ def _warmup():
         warmup_pool()
     except Exception as e:  # never let warmup crash the process
         app.logger.warning(f"[Warmup] process pool warmup failed: {e}")
+
+    if compute_range_ladder is None:
+        app.logger.error(
+            "[Warmup] /range_ladder unavailable, skipping its warmup: "
+            f"{RANGE_LADDER_IMPORT_ERROR}"
+        )
+        return
 
     try:
         # Run the full range-ladder path once on a tiny input so the first
@@ -315,7 +348,18 @@ def range_ladder_endpoint():
     engine examined and rejected (bad card syntax, colliding cards, a hero
     absent from `dead` -- every one of those is a ValueError out of
     compute_range_ladder), 500 only for genuine internal faults.
+
+    503 if the range_ladder module could not be imported at startup (see the
+    guarded import at the top of this file) -- the rest of the engine keeps
+    serving, and this endpoint says so plainly rather than 500ing on a
+    NoneType call.
     """
+    if compute_range_ladder is None:
+        return jsonify({
+            "error": "range_ladder unavailable",
+            "details": RANGE_LADDER_IMPORT_ERROR,
+        }), 503
+
     if not _engine_authorized():
         return jsonify({"error": "unauthorized"}), 401
     data = request.get_json(silent=True) or {}
