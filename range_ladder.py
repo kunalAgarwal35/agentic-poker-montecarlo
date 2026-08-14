@@ -34,7 +34,12 @@ from itertools import combinations
 import numpy as np
 
 import fast_score
-from card_encoding import generate_deck_ints, hand_str_to_ints, ints_to_hand_str
+from card_encoding import (
+    CARD_TO_INT,
+    generate_deck_ints,
+    hand_str_to_ints,
+    ints_to_hand_str,
+)
 from fast_score import batch_best_score
 from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
@@ -184,6 +189,56 @@ _CATEGORY_LABELS = {
     "quads": "quads",
     "straightflush": "straight flush",
 }
+
+
+# Every legal card spelling, exactly as card_encoding keys them: uppercase
+# rank + lowercase suit ("As", "Kh", "Td"). Cards are canonical everywhere in
+# this engine, and callers already send them that way -- postfloper
+# canonicalises client-side before the request leaves the browser
+# (src/services/nutsApi.ts). This set is the boundary check, not a
+# normalisation table: see _parse_cards.
+_CANONICAL_CARDS = frozenset(CARD_TO_INT)
+
+
+def _parse_cards(text, what):
+    """Split `text` into its canonical two-character cards, raising
+    ValueError -- never KeyError or TypeError -- on anything malformed.
+
+    Card syntax is CALLER-supplied input, so a bad card is an input error
+    (server.py maps this module's ValueError to 422), not an internal fault.
+    Before this existed, `hand_str_to_ints` was the first thing to touch the
+    string and died with a bare `KeyError: 'as'` several frames down inside
+    card_encoding, which the route could only report as a 500 -- final
+    review, Finding 2. Validating explicitly at the boundary is what keeps
+    that route's catch narrow: a KeyError raised from inside the numeric
+    code still means a genuine internal fault and still surfaces as a 500,
+    because this function has already ruled out the input-shaped causes.
+
+    Deliberately does NOT case-normalise. `CARD_TO_INT`'s keys are canonical
+    only, so "as" has no meaning here; accepting it would be inventing a
+    second spelling rather than serving a real caller. It is a plain input
+    error and gets a plain, named input error back.
+
+    `what` names the offending field in the message ("board", "dead[1]",
+    "hero 'u1' cards") so the caller can tell WHICH input was rejected.
+    """
+    if not isinstance(text, str):
+        raise ValueError(
+            f"{what} must be a string of 2-character cards, got {text!r}"
+        )
+    if not text or len(text) % 2:
+        raise ValueError(
+            f"{what} must be a whole number of 2-character cards, got {text!r} "
+            f"({len(text)} characters)"
+        )
+    cards = [text[i:i + 2] for i in range(0, len(text), 2)]
+    bad = [c for c in cards if c not in _CANONICAL_CARDS]
+    if bad:
+        raise ValueError(
+            f"{what} contains invalid card(s) {bad} in {text!r}; cards are "
+            "uppercase rank + lowercase suit, e.g. 'As', 'Kh', 'Td'"
+        )
+    return cards
 
 
 def _pool_worker_warmup_task():
@@ -828,6 +883,11 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     stability even though Pass 2 does not actually use it to sample (see
     above) -- it describes the request, not what Pass 2 did with it.
     """
+    # Card SYNTAX is validated before anything is parsed -- see _parse_cards.
+    # Everything below may then assume every card string is well-formed, so
+    # the only failures left are the semantic ones (wrong board length,
+    # duplicate cards, hero not in `dead`), all of them ValueError.
+    _parse_cards(board, "board")
     board_ints = hand_str_to_ints(board)
     board_len = len(board_ints)
     if board_len not in (3, 4, 5):
@@ -839,9 +899,10 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
     # into a set (as the old code did) silently absorbs both -- two hands
     # can never legally share a card.
     dead_cards = []
-    for d in dead:
-        dead_cards.extend(ints_to_hand_str(hand_str_to_ints(d))[i:i + 2]
-                          for i in range(0, len(d), 2))
+    for i, d in enumerate(dead):
+        _parse_cards(d, f"dead[{i}]")
+        dead_cards.extend(ints_to_hand_str(hand_str_to_ints(d))[j:j + 2]
+                          for j in range(0, len(d), 2))
     if len(dead_cards) != len(set(dead_cards)):
         seen, dupes = set(), []
         for c in dead_cards:
@@ -861,9 +922,27 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
             f"card(s) {sorted(overlap)} appear in both `dead` and `board`"
         )
 
-    for hero in heroes:
-        # Normalise exactly as `dead` was, so case differences cannot cause a
-        # spurious rejection (postfloper lower-cases dead cards in places).
+    for i, hero in enumerate(heroes):
+        # Hero objects are caller-supplied too, so a missing key or a hero
+        # that isn't an object at all is an INPUT error (ValueError -> 422),
+        # not a TypeError/KeyError escaping as a 500 -- final review,
+        # Finding 2. `id` is validated alongside `cards` because it is read
+        # unconditionally further down, when the response is assembled.
+        if not isinstance(hero, dict):
+            raise ValueError(
+                f"heroes[{i}] must be an object with `id` and `cards`, got {hero!r}"
+            )
+        for key in ("id", "cards"):
+            if key not in hero:
+                raise ValueError(f"heroes[{i}] is missing required field `{key}`")
+        _parse_cards(hero["cards"], f"hero {hero['id']!r} cards")
+        # Round-tripped through the int encoding exactly as `dead` was, so
+        # the two sides of the membership test below are spelled identically.
+        # This is NOT case normalisation and never was: `hand_str_to_ints`
+        # looks each card up in CARD_TO_INT, whose keys are canonical only,
+        # so a lower-case card is rejected by _parse_cards above rather than
+        # silently accepted here (final review, Finding 2 -- the older
+        # comment here claimed otherwise, and the claim was never true).
         norm = ints_to_hand_str(hand_str_to_ints(hero["cards"]))
         cards = [norm[i:i + 2] for i in range(0, len(norm), 2)]
         missing = [c for c in cards if c not in dead_set]

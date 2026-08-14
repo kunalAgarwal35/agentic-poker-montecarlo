@@ -307,7 +307,14 @@ def range_ladder_endpoint():
     multiply cost the same way hands/rank_runouts/trials_per_bucket do,
     but silently dropping a caller's 11th hero or 13th bucket would answer
     a different, smaller question than the one asked instead of just
-    answering it more cheaply/noisily.
+    answering it more cheaply/noisily. Individual `buckets` VALUES are
+    rejected the same way unless they are numbers in (0, 100] (see below).
+
+    Status codes: 400 for a malformed request envelope (missing/oversized/
+    wrong-typed fields this route checks itself), 422 for card input the
+    engine examined and rejected (bad card syntax, colliding cards, a hero
+    absent from `dead` -- every one of those is a ValueError out of
+    compute_range_ladder), 500 only for genuine internal faults.
     """
     if not _engine_authorized():
         return jsonify({"error": "unauthorized"}), 401
@@ -317,6 +324,14 @@ def range_ladder_endpoint():
     heroes = data.get('heroes')
     if not board or not heroes:
         return jsonify({"error": "Missing required field: board and heroes"}), 400
+    # Type-checked before len(): a non-list `heroes` (say a bare number)
+    # would otherwise raise TypeError right here, OUTSIDE the try below, and
+    # Flask would turn a plain caller error into an unlogged 500.
+    if not isinstance(heroes, list):
+        return jsonify({
+            "error": "Invalid input",
+            "details": f"`heroes` must be a list of objects, got {type(heroes).__name__}",
+        }), 400
     if len(heroes) > MAX_HEROES:
         return jsonify({
             "error": "Too many heroes",
@@ -326,6 +341,14 @@ def range_ladder_endpoint():
     buckets_raw = data.get('buckets')
     if buckets_raw is None:
         buckets = tuple(DEFAULT_BUCKETS)
+    elif not isinstance(buckets_raw, list):
+        # Same reason as `heroes` above, plus one specific to this field: a
+        # bare string passes len() and tuple()s into ['a','b','c'], which
+        # used to reach the engine and die there as a 500.
+        return jsonify({
+            "error": "Invalid input",
+            "details": f"`buckets` must be a list of numbers, got {type(buckets_raw).__name__}",
+        }), 400
     elif len(buckets_raw) == 0:
         return jsonify({"error": "`buckets` must not be empty"}), 400
     elif len(buckets_raw) > MAX_BUCKETS:
@@ -334,6 +357,35 @@ def range_ladder_endpoint():
             "details": f"at most {MAX_BUCKETS} buckets per request, got {len(buckets_raw)}",
         }), 400
     else:
+        # Each bucket is a PERCENTILE of the villain population, so the only
+        # meaningful values are (0, 100]: 100 is the whole population, and
+        # anything at or below 0 selects no hands at all. The engine's
+        # `take = max(1, int(round(n * pct / 100.0)))` silently absorbed
+        # nonsense instead of refusing it -- `[0]` and `[-5]` each returned
+        # 200 with a rung labelled 0 or -5 whose "equity" came from a single
+        # hand, `[500]` labelled the whole population 500%, and `["x"]` was
+        # a 500 (final review, Finding 3). Rejected (400) rather than
+        # clamped, for the same reason as the heroes/buckets COUNT limits
+        # above: answering a percentile the caller didn't ask for is worse
+        # than refusing the request.
+        #
+        # Duplicates and non-ascending order are deliberately ALLOWED.
+        # Buckets are independent cumulative top-pct slices -- each one is
+        # computed from `strength` alone, so order carries no meaning and
+        # the response echoes the caller's order on purpose (a caller may
+        # legitimately ask for [100, 5, 50]; the endpoint has a test for
+        # exactly that). A duplicate simply asks the same question twice
+        # and gets the same rung twice; it costs a repeated Pass-2 block,
+        # which MAX_BUCKETS already bounds.
+        bad = [b for b in buckets_raw
+               if isinstance(b, bool) or not isinstance(b, (int, float))
+               or not 0 < b <= 100]
+        if bad:
+            return jsonify({
+                "error": "Invalid input",
+                "details": (f"`buckets` values must be numbers in (0, 100], "
+                            f"got {bad}"),
+            }), 400
         buckets = tuple(buckets_raw)
 
     seed = data.get('seed')

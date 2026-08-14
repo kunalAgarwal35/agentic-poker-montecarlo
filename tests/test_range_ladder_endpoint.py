@@ -4,6 +4,9 @@ Payload sizes here are deliberately tiny (small hands/rank_runouts/
 trials_per_bucket) so the suite stays fast; the shipped defaults are ~5-6s
 per call and are exercised by range_ladder.py's own test suite, not here.
 """
+import pytest
+
+import server
 from server import (
     app,
     DEFAULT_HANDS,
@@ -344,3 +347,145 @@ def test_string_seed_still_works_and_matches_integer_seed():
     # Determinism must not depend on which JSON type the caller sent the
     # seed as -- same seed value in, same ladder out.
     assert resp_int.get_json() == resp_str.get_json()
+
+
+# ---------------------------------------------------------------------------
+# Final review, Finding 2: card-syntax errors escaped as 500s. `hand_str_to_ints`
+# raises KeyError on a malformed or non-canonical card and malformed hero
+# objects raise TypeError/KeyError -- neither is a ValueError, so both fell
+# past the route's `except ValueError -> 422` into the bare 500 handler. Cards
+# are canonical `Rank`+`suit` (uppercase rank, lowercase suit) and every real
+# caller already sends them that way, so these are plain input errors: 422,
+# with a message naming what was wrong.
+# ---------------------------------------------------------------------------
+
+_CARD_SYNTAX_PAYLOADS = {
+    "lowercase rank": {"board": "6s7s4s", "dead": ["asks9h2c"],
+                       "heroes": [{"id": "u1", "cards": "asks9h2c"}]},
+    "bogus rank letter": {"board": "6s7s4s", "dead": ["ZZKs9h2c"],
+                          "heroes": [{"id": "u1", "cards": "AsKs9h2c"}]},
+    "bogus suit letter": {"board": "6s7s4s", "dead": ["AxKs9h2c"],
+                          "heroes": [{"id": "u1", "cards": "AsKs9h2c"}]},
+    "odd-length board": {"board": "6s7s4", "dead": ["AsKs9h2c"],
+                         "heroes": [{"id": "u1", "cards": "AsKs9h2c"}]},
+    "odd-length hero": {"board": "6s7s4s", "dead": ["AsKs9h2c"],
+                        "heroes": [{"id": "u1", "cards": "AsKs9h2"}]},
+    "hero missing cards": {"board": "6s7s4s", "dead": ["AsKs9h2c"],
+                           "heroes": [{"id": "u1"}]},
+    "hero missing id": {"board": "6s7s4s", "dead": ["AsKs9h2c"],
+                        "heroes": [{"cards": "AsKs9h2c"}]},
+    "hero not an object": {"board": "6s7s4s", "dead": ["AsKs9h2c"],
+                           "heroes": ["AsKs9h2c"]},
+    "hero cards not a string": {"board": "6s7s4s", "dead": ["AsKs9h2c"],
+                                "heroes": [{"id": "u1", "cards": 42}]},
+    "board not a string": {"board": 42, "dead": ["AsKs9h2c"],
+                           "heroes": [{"id": "u1", "cards": "AsKs9h2c"}]},
+}
+
+
+@pytest.mark.parametrize("label", sorted(_CARD_SYNTAX_PAYLOADS))
+def test_malformed_card_input_is_a_422_with_a_useful_message(label):
+    payload = dict(_CARD_SYNTAX_PAYLOADS[label])
+    payload.update(hands=100, rank_runouts=5, trials_per_bucket=50, seed=1)
+    resp = client.post("/range_ladder", json=payload)
+    assert resp.status_code == 422, f"{label}: {resp.get_data(as_text=True)}"
+    details = resp.get_json()["details"]
+    # Useful == it names the offending field or the offending value, not a
+    # bare repr of some KeyError from three frames down.
+    assert details, label
+    assert any(t in details for t in ("board", "dead", "hero", "heroes")), (
+        f"{label}: unhelpful message {details!r}"
+    )
+
+
+def test_non_list_heroes_is_a_400_not_a_500():
+    # `heroes` is len()'d before the try block, so a non-sized value used to
+    # raise TypeError outside every handler.
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s", "dead": ["AsKs9h2c"], "heroes": 5,
+    })
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+
+
+def test_an_internal_failure_is_still_a_500(monkeypatch):
+    # The 422 above must come from validating card syntax at the boundary,
+    # NOT from broadening the route's catch. A KeyError raised from inside
+    # the computation is a genuine internal fault and must still be a 500.
+    def boom(**kwargs):
+        raise KeyError("some internal lookup")
+
+    monkeypatch.setattr(server, "compute_range_ladder", boom)
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s",
+        "dead": ["AsKs9h2c"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "hands": 100, "rank_runouts": 5, "trials_per_bucket": 50, "seed": 1,
+    })
+    assert resp.status_code == 500, resp.get_data(as_text=True)
+
+
+def test_a_valid_request_still_succeeds_after_syntax_validation():
+    # Guard against over-eager validation: canonical cards, an 8-card `dead`
+    # entry and a 5-card board must all still be accepted.
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s2h9d",
+        "dead": ["AsKs9h2c", "3dTc5s8h"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "hands": 100, "rank_runouts": 5, "trials_per_bucket": 50, "seed": 1,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+
+
+# ---------------------------------------------------------------------------
+# Final review, Finding 3: only the LENGTH of `buckets` was checked, so the
+# values passed straight through -- [0] and [-5] returned 200 with a rung
+# labelled 0 or -5 whose equity came from a single hand, [500] labelled the
+# whole population 500%, and ["x"] / "abc" were 500s. A bucket is a
+# percentile: it must be a number in (0, 100], rejected with 400 otherwise
+# (consistent with the MAX_BUCKETS/MAX_HEROES rejections).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("buckets", [
+    [0],                  # selects no hands; engine's max(1, ...) made it one hand
+    [-5],                 # negative percentile
+    [500],                # >100%: the whole population, mislabelled
+    [100.5],              # just over the top
+    ["x"],                # not a number at all
+    [5, 0, 100],          # one bad value among good ones
+    [None],
+    [True],               # bool is an int in Python; not a percentile
+    "abc",                # a bare string: passes len(), tuple()s to ['a','b','c']
+    5,                    # not a sequence at all
+])
+def test_invalid_bucket_values_are_a_400(buckets):
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s",
+        "dead": ["AsKs9h2c"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "buckets": buckets,
+        "hands": 100, "rank_runouts": 5, "trials_per_bucket": 50, "seed": 1,
+    })
+    assert resp.status_code == 400, resp.get_data(as_text=True)
+    assert "buckets" in resp.get_json()["details"]
+
+
+def test_valid_bucket_values_are_accepted_including_duplicates_and_descending():
+    # Duplicates and non-ascending order are ALLOWED on purpose: buckets are
+    # independent cumulative top-pct slices computed from `strength` alone,
+    # so order carries no meaning and a duplicate just asks the same
+    # question twice. The response echoes the caller's order, duplicates
+    # included.
+    resp = client.post("/range_ladder", json={
+        "board": "6s7s4s",
+        "dead": ["AsKs9h2c"],
+        "heroes": [{"id": "u1", "cards": "AsKs9h2c"}],
+        "buckets": [100, 5, 5, 12.5, 0.5],
+        "hands": 100, "rank_runouts": 5, "trials_per_bucket": 50, "seed": 1,
+    })
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    rungs = resp.get_json()["ladders"][0]["rungs"]
+    assert [r["bucket"] for r in rungs] == [100, 5, 5, 12.5, 0.5]
+    # The two identical 5% rungs must describe the same slice, not two
+    # different ones -- same edge hand, and (the river/flop equity is
+    # sampled per block, so equity may differ) the same boundary.
+    assert rungs[1]["edge"] == rungs[2]["edge"]
