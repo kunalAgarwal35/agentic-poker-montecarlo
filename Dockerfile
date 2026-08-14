@@ -29,6 +29,17 @@ COPY server.py .
 # Root support modules imported by pql
 COPY card_encoding.py hand_indexing.py hand_categories.py optimized_evaluator.py ./
 
+# Root modules on the /range_ladder path. This list is NOT hand-curated -- it is
+# the transitive root-module closure of `import server`, and there is a test
+# (tests/test_docker_image_completeness.py) that recomputes that closure and
+# fails if anything here is missing. That test exists because the omission it
+# guards took the whole engine down once: server.py grew `from range_ladder
+# import ...` at module scope while this COPY list stayed minimal, so the image
+# built fine, then died on import at container start -- taking /pql, a live
+# user-facing endpoint, with it. A missing file here is not a degraded feature;
+# it is a 502 on everything.
+COPY range_ladder.py fast_score.py hand_rank_evaluator.py process_pool.py ./
+
 # Runtime data files (see header)
 COPY score_array.npy category_array.npy \
      holdem_class_order.json plo4_class_order.json plo5_class_order.json ./
@@ -39,6 +50,14 @@ ENV PORT=8080
 # concurrency so simultaneous Monte-Carlo requests can't pile up allocations.
 ENV NUMBA_NUM_THREADS=1
 ENV NUMBA_CACHE_DIR=/tmp/numba-cache
+# /range_ladder's process pool. MUST be set here: range_ladder defaults to
+# os.cpu_count(), which inside a container reports the HOST's core count and
+# not the cgroup limit -- 24 workers were observed on a box entitled to a
+# fraction of one. Each worker is a separate interpreter holding numpy, numba
+# and the 21MB score_array, so an unset value is an OOM kill. Matches the
+# --threads=2 below: at most two requests are in flight, so more pools than
+# that buys nothing.
+ENV RANGE_LADDER_POOL_WORKERS=2
 ENV OMP_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
 EXPOSE 8080

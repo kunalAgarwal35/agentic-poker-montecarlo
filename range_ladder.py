@@ -49,7 +49,11 @@ from hand_rank_evaluator import (
     detect_game_type,
     get_score_array,
 )
-from multithread_ploequities3 import get_global_executor
+# Imported from process_pool, NOT multithread_ploequities3 (which re-exports the
+# same object): that module also imports pandas and, via generating_list ->
+# display_scenario, cv2 -- neither of which the engine image ships or this path
+# uses. Same pool, ~100MB less dependency closure.
+from process_pool import get_global_executor
 from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
@@ -155,7 +159,7 @@ DEFAULT_RANK_RUNOUTS = 300
 DEFAULT_TRIALS_PER_BUCKET = 50_000
 
 # Task 10: worker count for the persistent process pool (see
-# multithread_ploequities3.get_global_executor). Sized to the box's core
+# process_pool.get_global_executor). Sized to the box's core
 # count rather than that module's own _DEFAULT_WORKERS=4 (tuned for a
 # different, lighter-weight caller): this is the first thing in the app to
 # create the pool, so it gets to pick the size. get_global_executor()
@@ -163,7 +167,17 @@ DEFAULT_TRIALS_PER_BUCKET = 50_000
 # creates the pool first with a smaller count, evaluate_pass2/rank_hands
 # silently ride along on that smaller pool rather than failing -- correct,
 # just less parallel.
-DEFAULT_POOL_WORKERS = os.cpu_count() or 4
+#
+# RANGE_LADDER_POOL_WORKERS overrides the core count, and a container MUST
+# set it. `os.cpu_count()` reports the HOST's cores, not the cgroup CPU
+# limit the container is actually scheduled within, so on a small managed
+# box (Railway, Fly, a 0.5-vCPU task) an unset value spawns one worker per
+# host core -- observed at 24 here -- and each worker is a fresh interpreter
+# that loads numpy, numba and the 21MB score_array. That is an OOM kill, not
+# a slow response. The Dockerfile sets it to match waitress' --threads.
+DEFAULT_POOL_WORKERS = (
+    int(os.environ.get("RANGE_LADDER_POOL_WORKERS") or 0) or os.cpu_count() or 4
+)
 
 # Below this many total hand-evaluations, process-pool dispatch overhead
 # (pickling villains/heroes/board per chunk, IPC round-trip) costs more
