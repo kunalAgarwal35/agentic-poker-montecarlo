@@ -2,17 +2,26 @@
 
 See docs/superpowers/plans/2026-08-13-postflop-range-ladder.md
 
-Task 11 replaced the N-villains x R-shared-runouts grid with joint trial
-sampling: one trial draws hole_count + need cards in a single shot, the
-first hole_count go to the villain and the rest complete the board. See
-task-11-brief.md for why -- in short, shared runouts made hero equity an
-average over R board outcomes (precision governed by R alone, 5-7pp of
-noise even at the whole-population bucket) and required an eligible_mask
-skip-and-renormalise path to avoid villain/runout card collisions, which is
-exactly the class of bug that produced a duplicate-card crash. Joint
-sampling makes collisions impossible by construction (villain and runout
-cards come from the same draw) and every per-trial number exact (a
-completed 5-card board scores exactly, never an estimate).
+Task 13 replaces Task 11's single joint-trial pass with TWO passes that
+sample differently, because ranking and equity want opposite things:
+
+- Pass 1 (`rank_hands`) ranks villain HANDS -- not scenarios -- by scoring
+  every sampled hand on the SAME small set of shared runouts (common random
+  numbers: a paired comparison that reduces ranking noise per runout). This
+  answers "how strong is this hand against the population", which is a
+  property of the hand, not of any one runout it happens to hit.
+- Pass 2 (`sample_pass2_trials` / `evaluate_pass2`) measures hero EQUITY by
+  drawing a FRESH, independent runout per trial, stratified so every bucket
+  gets an equal trial budget regardless of how few hands populate it.
+  Sharing runouts here (as Task 11 effectively did, by ranking trials
+  instead of hands) correlates every villain's outcome and was the direct
+  cause of 5-7pp of noise surviving even at the whole-population bucket.
+
+Task 11's design ranked the 10,000 TRIALS by the villain's hand rank on
+its OWN completed board -- that ranks scenarios (a weak hand on a lucky
+runout could out-rank a premium hand that bricked), not hands, so the
+"top 5%" wasn't a hand-range and the edge hand wasn't nameable. See
+task-13-brief.md for the full defect writeup and the two-pass fix.
 """
 import os
 from itertools import combinations
@@ -35,40 +44,79 @@ from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
 
-# Task 11 chose T=350000 this way; Task 12 re-ran the identical sweep
-# methodology (PLO6, the binding case for TIME; 16 seeds -- the brief's
-# minimum, after this project already saw an 8-seed estimate read 11.12pp
-# where 16 seeds read 38.99pp on the predecessor design) after routing
-# score_hands through fast_score's numba kernel instead of
-# hand_rank_evaluator's pure-numpy _batch_best_score (same math, no
-# (N, C_h*C_b, 5) int32 temporary -- see task-12-brief.md).
+# --- Pass 1 defaults: rank hands on shared runouts ---------------------
 #
-# Task 12's FIRST pass picked T=1500000 (largest candidate with 0/16 seeds
-# over the 2.5s budget on the author's box: mean 2.361s, max 2.411s -- only
-# 3.6% headroom). That did NOT survive a loaded machine: re-measured at
-# 3.21-3.44s/board (both 8 and 24 workers) on a busier box -- over budget.
-# Fix round 1 replaced it with the number below, deliberately NOT the
-# largest trials count that fits an idle machine -- chosen for headroom
-# under load instead. Someone re-"optimising" this back up toward the
-# 2.5s ceiling will reproduce the exact regression fix round 1 corrected.
+# DEFAULT_HANDS: size of the villain-hand population Pass 1 ranks. 10,000
+# matches the population size prior tasks (8-12) swept for the SAME role
+# under the old hands x runouts grid and, later, joint trial sampling --
+# large enough that percentile cuts (5% = 500 hands) still contain plenty
+# of hands even at the tightest bucket. A churn/spread sweep (see
+# DEFAULT_RANK_RUNOUTS and task-13-report.md) found `hands` is NOT the
+# lever for closing the remaining per-bucket spread -- a fixed-population
+# check (same 10,000 hands re-ranked across 16 seeds, only the runouts
+# varying) showed spread almost as large as letting the population vary
+# too, so the dominant noise source is Pass-1 ranking precision
+# (rank_runouts), not how many hands get sampled in the first place.
+# Raising `hands` further mainly buys Pass-1 wall-clock cost, not
+# accuracy, at this budget.
+DEFAULT_HANDS = 10_000
+
+# DEFAULT_RANK_RUNOUTS: how many shared runouts Pass 1 scores every hand
+# against. The brief's own suggested starting point (30) was measured and
+# rejected: a boundary-churn check (16 seeds, PLO6, a FIXED 10,000-hand
+# population so only the runout sample varies between seeds) found 30
+# shared runouts leaves 73.6% of hands flipping which bucket they land in
+# from one independent Pass-1 run to the next, with edge-hand strength
+# spreads of 3.4-6.6pp -- nowhere near "good enough to bucket correctly".
+# 300 cuts churn to 29.5% and edge-hand spread to 1.4-2.4pp -- a real,
+# large improvement, though not a complete fix (see task-13-report.md's
+# "Correctness bar" section for the honest remainder: some churn survives
+# even here, and closing it further trades directly against the 2.5s
+# budget via Pass 1's hands x rank_runouts cost). 300 was chosen as the
+# point past which pushing rank_runouts further stopped being the
+# most efficient use of the remaining time budget: at hands=10,000 it
+# still leaves ~39% headroom against the 2.5s PLO6 budget together with a
+# useful DEFAULT_TRIALS_PER_BUCKET (see below), whereas rank_runouts=1000
+# alone (holding trials_per_bucket fixed) blew the budget (3.3s+) without
+# proportionally shrinking the residual bucket-5 spread -- see
+# task-13-report.md for the full sweep.
+DEFAULT_RANK_RUNOUTS = 300
+
+# --- Pass 2 defaults: stratified equity, independent runouts ----------
 #
-# T=1000000, 16 seeds: 1.67s/board, worst bucket (15%) 0.76pp -- ~33%
-# time headroom under the 2.5s budget (vs 3.6% at T=1500000). Every
-# bucket stays inside +/-1pp:
-#   bucket   5%: 0.24pp  REACHED
-#   bucket  15%: 0.76pp  REACHED  <- worst bucket, was 1.42pp at Task 11's
-#                                     T=350000, still the binding one here
-#   bucket  25%: 0.45pp  REACHED
-#   bucket  40%: 0.28pp  REACHED
-#   bucket  60%: 0.19pp  REACHED
-#   bucket 100%: 0.11pp  REACHED
+# DEFAULT_TRIALS_PER_BUCKET: independent Pass-2 trials PER BUCKET (not
+# total) -- stratification is what fixes Task 11's binding constraint
+# (population sampling gave the top-5% bucket only 5% of trials, so the
+# tight buckets were the worst-measured ones even though they mattered
+# most). Equal budgets give equal precision across buckets regardless of
+# how few hands populate the tightest one -- confirmed in the sweep below:
+# spread is no longer "tight buckets worse", it now tracks Pass-1 ranking
+# noise (bucket 5, the smallest slice, still shows the most churn -- see
+# DEFAULT_RANK_RUNOUTS) rather than trial count.
 #
-# Cost is trials x (1 + heroes): a multi-hero compute_range_ladder call is
-# proportionally slower than this single-hero benchmark fixture -- e.g. 3
-# heroes at this same T roughly doubles the per-call time the sweep above
-# measured for 1 hero. See bench_range_ladder.py and task-12-report.md
-# (including its fix-round-1 addendum) for the full sweep tables.
-DEFAULT_TRIALS = 1_000_000
+# Picked jointly with DEFAULT_HANDS/DEFAULT_RANK_RUNOUTS via the same
+# methodology Task 12 used for the old DEFAULT_TRIALS: PLO6 (the binding
+# case for TIME), >=16 seeds (the brief's minimum -- an 8-seed and a
+# 3-seed estimate each produced a confidently wrong conclusion earlier in
+# this project), inside the 2.5s budget with real headroom for a loaded
+# machine rather than the largest value that fits an idle box (the old
+# DEFAULT_TRIALS was picked at 3.6% headroom and overran 2.5s on a busy
+# machine -- see git history / task-12-report.md).
+#
+# hands=10,000 / rank_runouts=300 / trials_per_bucket=50,000, PLO6, single
+# hero, 16 seeds: mean 1.481s, max 1.526s -- ~39% headroom under 2.5s.
+# Per-bucket equity spread (pp): 5%=2.73  15%=1.28  25%=1.66  40%=1.02
+# 60%=1.27  100%=0.67. NOT every bucket is inside +/-1pp at this budget
+# (bucket 5 is the worst, at 2.73pp) -- reported honestly, not rounded
+# away: closing the remainder needs a materially larger rank_runouts AND
+# hands together (see DEFAULT_RANK_RUNOUTS's comment and
+# task-13-report.md), which this box's 2.5s PLO6 budget does not afford.
+# What DID improve over the old single-pass grid: the spread is no longer
+# lopsided toward the tight buckets (old grid: 15% at 0.76pp vs 100% at
+# 0.11pp, a ~7x gap) -- here the tightest and widest buckets are within
+# about 4x of each other, and several mid buckets (40%, 60%) sit close to
+# the 1pp line.
+DEFAULT_TRIALS_PER_BUCKET = 50_000
 
 # Task 10: worker count for the persistent process pool (see
 # multithread_ploequities3.get_global_executor). Sized to the box's core
@@ -76,17 +124,16 @@ DEFAULT_TRIALS = 1_000_000
 # different, lighter-weight caller): this is the first thing in the app to
 # create the pool, so it gets to pick the size. get_global_executor()
 # ignores num_workers on every call after the first, so if some other path
-# creates the pool first with a smaller count, evaluate_trials silently
-# rides along on that smaller pool rather than failing -- correct, just
-# less parallel.
+# creates the pool first with a smaller count, evaluate_pass2/rank_hands
+# silently ride along on that smaller pool rather than failing -- correct,
+# just less parallel.
 DEFAULT_POOL_WORKERS = os.cpu_count() or 4
 
-# Below this many total hand-evaluations ((1 + heroes) x trials),
-# process-pool dispatch overhead (pickling villains/heroes/board per chunk,
-# IPC round-trip) costs more than it saves. "A few thousand" per the Task 10
-# brief; not re-measured precisely because every realistic caller (trials in
-# the hundreds-to-tens-of-thousands range) sits far on one side of this line
-# or the other -- see task-10-report.md.
+# Below this many total hand-evaluations, process-pool dispatch overhead
+# (pickling villains/heroes/board per chunk, IPC round-trip) costs more
+# than it saves. "A few thousand" per the Task 10 brief; not re-measured
+# precisely because every realistic caller sits far on one side of this
+# line or the other -- see task-10-report.md.
 _PARALLEL_MIN_EVALS = 4000
 
 # hand_categories.CATEGORY_TOKENS is index-aligned (low -> high strength) with
@@ -109,19 +156,18 @@ _CATEGORY_LABELS = {
 
 
 def _pool_worker_warmup_task():
-    """Module-level (Windows-spawn-picklable, same rationale as
-    `_evaluate_trials_chunk_worker`) warmup task run inside EVERY persistent
-    pool worker process: forces the worker to spawn (same role the old
-    `_dummy_warmup_task` no-op played) and, via fast_score.warmup(), triggers
-    that worker's own numba JIT (or, with cache=True and the disk cache
-    already populated by whichever process warmed first, a cache load
-    instead of a fresh compile -- see task-12-report.md for the measurement
-    confirming this actually happens rather than being assumed).
+    """Module-level (Windows-spawn-picklable, same rationale as the other
+    module-level worker entrypoints below) warmup task run inside EVERY
+    persistent pool worker process: forces the worker to spawn and, via
+    fast_score.warmup(), triggers that worker's own numba JIT (or, with
+    cache=True and the disk cache already populated by whichever process
+    warmed first, a cache load instead of a fresh compile).
 
-    Real evaluate_trials chunks land on these SAME worker processes, so
-    warming only the main process (as fast_score.warmup() called directly
-    would) leaves every worker's first real chunk paying a compile-or-
-    cache-load stall the first time score_hands' numba path executes there.
+    Real evaluate_pass2/rank_hands chunks land on these SAME worker
+    processes, so warming only the main process (as fast_score.warmup()
+    called directly would) leaves every worker's first real chunk paying a
+    compile-or-cache-load stall the first time score_hands' numba path
+    executes there.
     """
     fast_score.warmup()
     return 1
@@ -134,10 +180,10 @@ def warmup_pool():
     existing background warmup thread.
 
     Also warms fast_score's numba kernel in THIS (main) process first --
-    compute_range_ladder's serial path (small `trials`, or `parallel=False`)
-    runs score_hands in-process, never touching the pool -- and then in
-    every pool worker via `_pool_worker_warmup_task`, so both the serial and
-    parallel code paths are covered.
+    compute_range_ladder's serial path (small workloads, or
+    `parallel=False`) runs score_hands in-process, never touching the pool
+    -- and then in every pool worker via `_pool_worker_warmup_task`, so
+    both the serial and parallel code paths are covered.
 
     Deliberately does NOT call multithread_ploequities3.warmup_executor():
     that function hardcodes _DEFAULT_WORKERS (4 -- sized for a different,
@@ -161,11 +207,12 @@ def sample_villains(deck, num_cards, n, rng):
     Falls back to exhaustive enumeration when the space is smaller than `n`,
     so tiny decks return every hand exactly once instead of looping forever.
 
-    Kept from the pre-Task-11 design (not called by compute_range_ladder
-    any more -- see `sample_trials`, which reuses this function's
-    argsort-of-random-keys distinct-draw trick but, being one independent
-    Monte Carlo trial per row rather than a fixed population, does not need
-    this function's cross-row dedup/rejection-sampling loop).
+    This is Pass 1's villain population: `n` DISTINCT hands, each scored
+    against Pass 1's shared runouts to produce a ranking. Distinctness here
+    (unlike Pass 2's trials, which reuse bucket members with replacement)
+    matters because a duplicated hand would be double-counted in the
+    "share of the field it beats" computation without contributing any new
+    information.
     """
     deck = np.asarray(deck, dtype=np.int32)
     total = len(deck)
@@ -195,35 +242,38 @@ def sample_villains(deck, num_cards, n, rng):
     return np.array(rows, dtype=np.int32)
 
 
-def sample_trials(deck, hole_count, board_len, trials, rng):
-    """`trials` independent joint draws: villain hand + board completion.
+def sample_runouts(deck, board_len, r, rng):
+    """`r` shared board completions, drawn ONCE and reused across every
+    villain hand Pass 1 ranks -- the common-random-numbers trick that makes
+    ranking a paired comparison instead of an independent one per hand.
 
-    Each row draws `hole_count + need` DISTINCT cards from `deck`, where
-    `need = 5 - board_len`. The first `hole_count` cards are the villain's
-    hand; the remaining `need` are the runout that completes the board.
-    Reuses sample_villains' argsort-of-random-keys trick for drawing k
-    distinct cards from n in one vectorized shot -- but unlike
-    sample_villains, rows here are NOT deduplicated against each other:
-    these are `trials` independent Monte Carlo scenarios, not a fixed
-    population, so two trials landing on the same cards is expected and
-    unbiased, not a defect to reject.
-
-    River (`board_len == 5`, `need == 0`): each row is just a villain hand,
-    exactly `hole_count` cards -- the "board completion" is empty because
-    there is nothing left to complete.
-
-    Returns an empty (0, hole_count + need) array if the deck is smaller
-    than what one trial needs (mirrors sample_villains' behavior for a
-    too-small deck).
+    River (`board_len == 5`, `need == 0`): a single empty runout. The board
+    is already complete, so there is nothing to sample and ranking is
+    exact (score every hand once, no averaging over runouts at all).
     """
     deck = np.asarray(deck, dtype=np.int32)
-    total = len(deck)
     need = 5 - board_len
-    num_cards = hole_count + need
-    if total < num_cards:
-        return np.empty((0, num_cards), dtype=np.int32)
-    draw = rng.random((trials, total)).argsort(axis=1)[:, :num_cards]
+    if need <= 0:
+        return np.empty((1, 0), dtype=np.int32)
+    draw = rng.random((r, len(deck))).argsort(axis=1)[:, :need]
     return deck[draw].astype(np.int32)
+
+
+def eligible_mask(hands, runout):
+    """False for hands holding a card that `runout` also uses.
+
+    Those pairings are impossible and must never be scored. Pass 1's
+    shared runouts are drawn BEFORE the villain hands, so a runout can
+    legally hold a card a given villain hand also holds -- unlike Pass 2,
+    where the runout is drawn after (and explicitly excludes) the
+    villain's cards, so no collision is possible there by construction.
+    Skipping an ineligible (hand, runout) pair here and averaging each
+    hand only over the runouts it IS eligible for is the correct
+    conditional distribution -- unbiased, not an approximation.
+    """
+    if runout.size == 0:
+        return np.ones(hands.shape[0], dtype=bool)
+    return ~np.isin(hands, runout).any(axis=1)
 
 
 def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
@@ -231,18 +281,15 @@ def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
 
     `board5` is either a single board shared by every hand, shape (5,), or
     a per-hand board, shape (hands.shape[0], 5) -- one row per hand, as
-    `evaluate_trials` needs: every trial completes the board with its own
-    runout, so hand i must be scored against board5[i], not one board
-    shared across the whole call.
+    Pass 2's evaluator needs: every trial completes the board with its own
+    independent runout, so hand i must be scored against board5[i], not one
+    board shared across the whole call.
 
-    Task 12: the actual per-chunk scoring is `fast_score.batch_best_score`,
-    a numba kernel that does the same work as the numpy reference path
-    (`hand_rank_evaluator._batch_best_score`) with none of its (N, C_h*C_b,
-    5) temporaries. `use_numba` passes straight through to that dispatcher
-    (None -> module-level default, True/False -> force a path) -- exposed
-    here, not just in fast_score, so tests/test_fast_score.py can force
-    either path through the SAME call site range_ladder actually uses,
-    rather than only at the raw kernel level.
+    The actual per-chunk scoring is `fast_score.batch_best_score`, a numba
+    kernel. `use_numba` passes straight through to that dispatcher (None ->
+    module-level default, True/False -> force a path) -- exposed here, not
+    just in fast_score, so tests/test_fast_score.py can force either path
+    through the SAME call site range_ladder actually uses.
     """
     hand_combos = _HAND_COMBOS[game]
     n = hands.shape[0]
@@ -262,16 +309,211 @@ def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
     return out
 
 
-def _evaluate_trials_chunk(trials_arr, heroes, board_ints, hole_count, game, score_array):
-    """Score one CONTIGUOUS chunk of trial rows: exact villain score and
-    every hero's result, per trial, on that trial's own completed board.
+def _split_rows(arr, num_chunks):
+    """Contiguous, order-preserving split into at most `num_chunks` pieces.
 
-    Pure, no globals touched besides reading `score_array` -- this is the
-    whole per-trial computation `evaluate_trials` used to run directly; it
-    is now shared by the serial path (called in-process with the caller's
-    own score_array) and the parallel worker entrypoint below (which
-    supplies its own copy via get_score_array()). No behavior change
-    between the two paths.
+    Shared by Pass 1 (splits the runout axis) and Pass 2 (splits the trial
+    axis). Clamped so num_chunks never exceeds the row count -- np.array_split
+    would otherwise hand back empty trailing chunks, which is wasted
+    dispatch, not a correctness problem.
+    """
+    num_chunks = max(1, min(int(num_chunks), arr.shape[0]))
+    return np.array_split(arr, num_chunks, axis=0)
+
+
+# ---------------------------------------------------------------------------
+# Pass 1: rank hands on shared runouts.
+# ---------------------------------------------------------------------------
+
+def _rank_chunk(villain_hands, board_ints, runouts_chunk, game, score_array):
+    """Score EACH runout in this CONTIGUOUS chunk of shared runouts against
+    only the villain hands ELIGIBLE for it. Returns (scores, eligible), both
+    shape (runouts_chunk.shape[0], villain_hands.shape[0]) -- NOT reduced.
+
+    A shared runout can hold a card a villain hand also holds -- collisions
+    return in Pass 1 (unlike Pass 2, where the runout is drawn after the
+    villain and cannot collide). Scoring an ineligible (hand, runout) pair
+    would feed the bounds-unchecked scoring kernel a card set with a
+    duplicate card, which crashes the process rather than raising -- so the
+    eligibility mask is computed and applied BEFORE score_hands ever sees
+    that runout's board, never as an after-the-fact filter on results that
+    were already (illegally) computed. Ineligible cells are left as NaN;
+    `_reduce_rank_scores` only ever reads cells `eligible` marks True.
+
+    This is the only part of Pass 1 that gets parallelised: the caller
+    concatenates chunks along axis 0 (the runout axis, never summed) and
+    performs the ranking reduction (`_reduce_rank_scores`) exactly once,
+    afterward, on the fully assembled matrix. That keeps the reduction's
+    floating-point summation order fixed regardless of how many chunks or
+    workers produced the pieces being reduced -- see rank_hands.
+    """
+    hands = villain_hands.shape[0]
+    r = runouts_chunk.shape[0]
+    scores = np.full((r, hands), np.nan, dtype=np.float64)
+    eligible = np.empty((r, hands), dtype=bool)
+    for i, runout in enumerate(runouts_chunk):
+        mask = eligible_mask(villain_hands, runout)
+        eligible[i] = mask
+        idx = np.flatnonzero(mask)
+        if idx.size == 0:
+            continue
+        board5 = (np.concatenate([board_ints, runout]) if runout.size
+                 else np.asarray(board_ints)).astype(np.int32)
+        scores[i, idx] = score_hands(villain_hands[idx], board5, game, score_array)
+    return scores, eligible
+
+
+def _rank_chunk_worker(villain_hands, board_ints, runouts_chunk, game):
+    """Module-level entrypoint submitted to the persistent process pool.
+
+    Deliberately does NOT take score_array as a parameter -- see the same
+    rationale on `_evaluate_pass2_chunk_worker` below (shipping a ~21MB
+    array per dispatch would dwarf the actual per-chunk computation).  Must
+    stay at module level: Windows' spawn start method pickles a reference
+    to this function by qualified name and re-imports `range_ladder` in the
+    child process to resolve it.
+    """
+    return _rank_chunk(villain_hands, board_ints, runouts_chunk, game, get_score_array())
+
+
+def _reduce_rank_scores(scores, eligible):
+    """The ranking reduction: for each runout (row), each ELIGIBLE hand's
+    share of the eligible field it beats (win + 1/2 tie, normalised by
+    field_size - 1), summed into beat_sum/beat_cnt across runouts.
+
+    Runs ONCE, always serially, on the fully assembled (runouts, hands)
+    matrices -- never split across workers -- so it produces the exact
+    same beat_sum/beat_cnt regardless of how `scores`/`eligible` were
+    computed (single process or any number of parallel chunks): those
+    chunks are only ever concatenated (never summed) before reaching here,
+    so this function's own summation order is the only one that matters,
+    and it never changes.
+
+    Ineligible hands (colliding with that runout) are excluded from BOTH
+    the ranking field AND their own beat_sum/beat_cnt for that runout --
+    Task 13's "skip, don't score" collision rule (see eligible_mask).
+    """
+    r, n = scores.shape
+    beat_sum = np.zeros(n, dtype=np.float64)
+    beat_cnt = np.zeros(n, dtype=np.float64)
+    for i in range(r):
+        idx = np.flatnonzero(eligible[i])
+        if idx.size < 2:
+            # Need at least 2 eligible hands for "share of the field"
+            # (excluding self) to be defined. Essentially impossible with
+            # a realistic hand population and deck; skipped defensively.
+            continue
+        vs = scores[i, idx]
+        order = np.sort(vs)
+        lower = np.searchsorted(order, vs, side="left")     # strictly worse
+        upper = np.searchsorted(order, vs, side="right")
+        ties = upper - lower - 1                              # excluding self
+        share = (lower + 0.5 * ties) / (idx.size - 1)
+        beat_sum[idx] += share
+        beat_cnt[idx] += 1.0
+    return beat_sum, beat_cnt
+
+
+def rank_hands(villain_hands, board_ints, runouts, game, score_array,
+               parallel=None, num_workers=None):
+    """Pass 1: rank every villain hand by its mean share of the field it
+    beats, averaged over the shared runouts it is eligible for.
+
+    Returns (strength, eligible_counts): strength[i] is hand i's ranking
+    (NaN-free -- 0.0 for a hand eligible on zero runouts, which
+    `compute_range_ladder` filters out via eligible_counts before bucketing,
+    the same guard the pre-Task-11 `evaluate_population` used). Cost is
+    hands x runouts.shape[0] evaluations -- each hand scored once per
+    runout, never pairwise (the sort/searchsorted trick above avoids an
+    O(hands^2) comparison).
+    """
+    hands = villain_hands.shape[0]
+    r = runouts.shape[0]
+    n_evals = hands * r
+
+    if parallel is None:
+        parallel = r > 1 and n_evals >= _PARALLEL_MIN_EVALS
+
+    if parallel and r > 1:
+        workers = num_workers or DEFAULT_POOL_WORKERS
+        executor = get_global_executor(workers)
+        chunks = _split_rows(runouts, workers)
+        futures = [executor.submit(_rank_chunk_worker, villain_hands, board_ints, chunk, game)
+                   for chunk in chunks]
+        # .result() in chunk-submission order, not as_completed(): the
+        # concatenation below must reassemble runouts in a fixed order
+        # regardless of which worker finishes first.
+        partials = [f.result() for f in futures]
+        scores = np.concatenate([p[0] for p in partials], axis=0)
+        eligible = np.concatenate([p[1] for p in partials], axis=0)
+    else:
+        scores, eligible = _rank_chunk(villain_hands, board_ints, runouts, game, score_array)
+
+    beat_sum, beat_cnt = _reduce_rank_scores(scores, eligible)
+    strength = np.divide(beat_sum, beat_cnt, out=np.zeros_like(beat_sum), where=beat_cnt > 0)
+    return strength, beat_cnt
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: stratified hero equity on independent runouts.
+# ---------------------------------------------------------------------------
+
+def sample_pass2_trials(deck, board_len, hole_count, villain_hands, bucket_indices,
+                        trials_per_bucket, rng):
+    """Stratified Pass-2 draws: `trials_per_bucket` INDEPENDENT trials per
+    bucket, concatenated into one array as contiguous per-bucket blocks (in
+    `bucket_indices` order) -- equal budget per bucket, not a share
+    proportional to population weight, which is what fixes Task 11's
+    binding constraint (the top-5% bucket getting only 5% of trials).
+
+    Each row: one villain hand drawn UNIFORMLY AT RANDOM WITH REPLACEMENT
+    from that bucket's members (`villain_hands[bucket_indices[b]]`, Pass
+    1's ranking) + a FRESH runout drawn from `deck` minus board (deck
+    already excludes board/dead, which includes every hero's cards) minus
+    THAT row's own villain cards.
+
+    No collision is possible: villain-card columns of `deck` have their
+    random key forced to +inf before the argsort-of-random-keys draw picks
+    the `need` lowest-keyed columns, so a masked column can only be chosen
+    if fewer than `need` unmasked columns remain -- never true for a real
+    deck. This is the structural guarantee behind "Pass 2 has no
+    collisions": the runout is drawn AFTER the villain and explicitly
+    excludes its cards, unlike Pass 1's shared runouts (drawn before any
+    villain, so a collision is possible there and must be masked out by
+    `eligible_mask` instead).
+    """
+    deck_arr = np.asarray(deck, dtype=np.int32)
+    total = deck_arr.size
+    need = 5 - board_len
+
+    blocks = []
+    for idx in bucket_indices:
+        pick = rng.integers(0, idx.size, size=trials_per_bucket)
+        blocks.append(villain_hands[idx[pick]])
+    villains_trial = np.concatenate(blocks, axis=0)      # (B*T, hole_count)
+
+    if need == 0:
+        # River: the board is already complete -- no runout to draw.
+        runouts = np.empty((villains_trial.shape[0], 0), dtype=np.int32)
+        return np.concatenate([villains_trial, runouts], axis=1).astype(np.int32)
+
+    keys = rng.random((villains_trial.shape[0], total))
+    collide = np.zeros((villains_trial.shape[0], total), dtype=bool)
+    for k in range(hole_count):
+        collide |= (villains_trial[:, k:k + 1] == deck_arr[None, :])
+    keys = np.where(collide, np.inf, keys)
+    order = keys.argsort(axis=1)[:, :need]
+    runouts = deck_arr[order].astype(np.int32)
+
+    return np.concatenate([villains_trial, runouts], axis=1).astype(np.int32)
+
+
+def _evaluate_pass2_chunk(trials_arr, heroes, board_ints, hole_count, game, score_array):
+    """Score one CONTIGUOUS chunk of Pass-2 trial rows: exact villain score
+    and every hero's result, per trial, on that trial's own completed
+    board. Structurally the per-trial computation Task 11's
+    `_evaluate_trials_chunk` used, reused here for Pass 2's stratified
+    draws instead of Task 11's population-wide joint sampling.
 
     Returns (villain_scores (T,), hero_results (H, T)) for this chunk's T
     rows -- the caller concatenates chunks back together along the trial
@@ -284,9 +526,6 @@ def _evaluate_trials_chunk(trials_arr, heroes, board_ints, hole_count, game, sco
     need = runouts.shape[1]
 
     if need == 0:
-        # River: the board is already complete and identical for every
-        # trial -- pass it as the single shared (5,) board so score_hands
-        # broadcasts it, rather than materializing a redundant (T, 5) copy.
         boards = board_ints
     else:
         board_tile = np.broadcast_to(board_ints, (t, board_ints.shape[0])).astype(np.int32)
@@ -305,70 +544,44 @@ def _evaluate_trials_chunk(trials_arr, heroes, board_ints, hole_count, game, sco
     return villain_scores, hero_results
 
 
-def _evaluate_trials_chunk_worker(trials_arr, heroes, board_ints, hole_count, game):
+def _evaluate_pass2_chunk_worker(trials_arr, heroes, board_ints, hole_count, game):
     """Module-level entrypoint submitted to the persistent process pool.
 
     Deliberately does NOT take score_array as a parameter. ProcessPoolExecutor
     pickles every argument across the process boundary; score_array is a
     ~2.6M-element float64 array (~21MB), and shipping it on every dispatch
-    would dwarf the actual per-chunk computation -- exactly the "silent
-    performance killer" flagged in the Task 10 brief. Instead each worker
-    calls get_score_array(), which np.load()s score_array.npy once per
-    process and caches it at module scope (hand_rank_evaluator._SCORE_ARRAY);
-    the cost is paid once per worker's lifetime, not once per chunk.
+    would dwarf the actual per-chunk computation. Instead each worker calls
+    get_score_array(), which np.load()s score_array.npy once per process
+    and caches it at module scope; the cost is paid once per worker's
+    lifetime, not once per chunk.
 
-    Must stay at module level (not a closure inside evaluate_trials):
-    Windows' spawn start method pickles a reference to this function by
-    qualified name and re-imports `range_ladder` in the child process to
-    resolve it, which only works for names reachable at import time.
+    Must stay at module level: Windows' spawn start method pickles a
+    reference to this function by qualified name and re-imports
+    `range_ladder` in the child process to resolve it.
     """
-    return _evaluate_trials_chunk(trials_arr, heroes, board_ints, hole_count,
-                                  game, get_score_array())
+    return _evaluate_pass2_chunk(trials_arr, heroes, board_ints, hole_count,
+                                 game, get_score_array())
 
 
-def _split_trials(trials_arr, num_chunks):
-    """Contiguous, order-preserving split into at most `num_chunks` pieces.
-
-    Clamped so num_chunks never exceeds the row count -- np.array_split would
-    otherwise hand back empty trailing chunks, which is wasted dispatch, not
-    a correctness problem (an empty chunk just contributes nothing).
-    """
-    num_chunks = max(1, min(int(num_chunks), trials_arr.shape[0]))
-    return np.array_split(trials_arr, num_chunks, axis=0)
-
-
-def evaluate_trials(trials_arr, heroes, board_ints, hole_count, game, score_array,
-                    parallel=None, num_workers=None):
-    """The single O(T x (1 + H)) pass over every trial. Returns
+def evaluate_pass2(trials_arr, heroes, board_ints, hole_count, game, score_array,
+                   parallel=None, num_workers=None):
+    """The O(T x (1 + H)) pass over every Pass-2 trial. Returns
     (villain_scores (T,), hero_results (H, T)).
 
-    villain_scores: each trial's exact villain best-five score (never an
-        estimate -- the board is complete and the evaluator is exact).
-    hero_results: hero_results[j, i] is hero j's result (1.0 win, 0.5 tie,
-        0.0 loss) against trial i's villain, scored on trial i's OWN
-        completed board.
-
-    Parallelised over trial chunks: unlike the predecessor evaluate_population
-    (which additively accumulated beat_sum/beat_cnt/hero_sum across shared
-    runouts, so summation ORDER mattered for float-exact reproducibility),
-    every trial here is independent and exact on its own -- there is no
-    reduction across trials at this layer, only a split-then-concatenate.
+    Parallelised over trial chunks: every trial is independent and exact on
+    its own -- there is no reduction across trials at this layer, only a
+    split-then-concatenate, exactly like Task 11's evaluate_trials was.
     Chunks are reassembled by np.concatenate in chunk-SUBMISSION order
     (never `as_completed()`), which reproduces the exact same per-trial
-    numbers regardless of how many workers ran or which one finished first:
-    concatenation does not reorder any floating-point operation the way
-    summation would, so parallel output is not merely close to serial
-    output within a tolerance, it is bit-identical.
+    numbers regardless of how many workers ran or which one finished first
+    -- parallel output is bit-identical to serial output, not merely close.
 
     `parallel`: None (default) auto-decides from population size -- below
     `_PARALLEL_MIN_EVALS` total hand-evaluations, or a single trial (which
-    cannot be split), the pool overhead isn't worth it and this runs the
-    single-process loop unchanged. Pass True/False to force one path or the
-    other (used by the parallel-equals-serial and worker-count-invariance
-    tests, which need identical inputs on both paths).
+    cannot be split), the pool overhead isn't worth it. Pass True/False to
+    force one path or the other.
     `num_workers`: chunk count for the parallel path (defaults to
-    DEFAULT_POOL_WORKERS). Does not resize the process pool itself if it was
-    already created with a different count elsewhere -- see get_global_executor.
+    DEFAULT_POOL_WORKERS).
     """
     t = trials_arr.shape[0]
     h = heroes.shape[0]
@@ -380,17 +593,15 @@ def evaluate_trials(trials_arr, heroes, board_ints, hole_count, game, score_arra
     if parallel and t > 1:
         workers = num_workers or DEFAULT_POOL_WORKERS
         executor = get_global_executor(workers)
-        chunks = _split_trials(trials_arr, workers)
-        futures = [executor.submit(_evaluate_trials_chunk_worker,
+        chunks = _split_rows(trials_arr, workers)
+        futures = [executor.submit(_evaluate_pass2_chunk_worker,
                                    chunk, heroes, board_ints, hole_count, game)
                    for chunk in chunks]
-        # .result() in chunk-submission order, not as_completed(): see the
-        # determinism note in the docstring above.
         partials = [f.result() for f in futures]
         villain_scores = np.concatenate([p[0] for p in partials])
         hero_results = np.concatenate([p[1] for p in partials], axis=1)
     else:
-        villain_scores, hero_results = _evaluate_trials_chunk(
+        villain_scores, hero_results = _evaluate_pass2_chunk(
             trials_arr, heroes, board_ints, hole_count, game, score_array
         )
     return villain_scores, hero_results
@@ -418,64 +629,85 @@ def describe_category(hand_ints, board5):
     return _CATEGORY_LABELS[CATEGORY_TOKENS[int(idx)]]
 
 
-def build_rungs(villain_scores, hero_results_row, villain_hands, runouts, buckets, board_ints):
-    """One rung per bucket: hero equity vs that slice + the slice's weakest
-    trial's villain hand, labelled on THAT SAME TRIAL's own completed board.
+def _compatible_board5(board_ints, runout_rows, hand):
+    """Board built from `board_ints` + the first `runout_rows` row `hand` is
+    eligible for (no shared card), or None if every runout collides.
 
-    Ranks trials by villain_scores alone (strongest first) -- hero-
-    independent by construction: the same ranking, the same slices, and the
-    same edge trial are used for every hero, only `hero_results_row`
-    differs per call.
-
-    Task 11: no eligibility/collision check is needed here (the predecessor
-    `_compatible_board5` helper, and the whole "does the boundary hand
-    collide with the runout used to label it" problem, are gone). A trial's
-    villain hand and its runout are drawn from the same distinct 7-or-8-card
-    pull, so they can never share a card -- the completed board used to
-    label the edge hand is that exact trial's own board, not a runout
-    borrowed from elsewhere.
+    describe_category feeds `hand` + this board straight into a
+    bounds-unchecked numba kernel; a runout sharing a card with `hand`
+    would produce a card set with a duplicate. Reuses `eligible_mask` --
+    the same collision check Pass 1 uses when scoring the whole population
+    -- applied to a single hand instead. On the river `runout_rows` is the
+    single empty completion, so every hand is trivially compatible
+    (eligible_mask is vacuously True for an empty runout).
     """
-    order = np.argsort(-villain_scores, kind="stable")   # strongest first
+    hand2d = hand[None, :]
+    for runout in runout_rows:
+        if eligible_mask(hand2d, runout)[0]:
+            return (np.concatenate([board_ints, runout]) if runout.size
+                   else np.asarray(board_ints)).astype(np.int32)
+    return None
+
+
+def _bucket_slices_and_edges(strength, villain_hands, buckets, board_ints, rank_runouts_arr):
+    """Cumulative top-`pct`% index slices (strongest first) and each
+    bucket's edge (the weakest hand in that slice, from Pass 1's own
+    ranking -- a genuine hand ranked by its own averaged strength, not a
+    per-trial artefact).
+
+    Hero-independent by construction: computed once from `strength` alone,
+    before any hero is considered, so every hero's ladder shares the exact
+    same bucket membership and edge hands.
+    """
+    order = np.argsort(-strength, kind="stable")      # strongest first
     n = order.size
-    rungs = []
+    bucket_indices = []
+    edges = []
     for pct in buckets:
         take = max(1, int(round(n * pct / 100.0)))
         sl = order[:take]
-        edge_idx = int(sl[-1])                            # weakest trial in the slice
+        bucket_indices.append(sl)
+        edge_idx = int(sl[-1])                         # weakest hand in the slice
         hand = villain_hands[edge_idx]
-        runout = runouts[edge_idx]
-        board5 = (np.concatenate([board_ints, runout]) if runout.size
-                 else np.asarray(board_ints)).astype(np.int32)
-        rungs.append({
-            "bucket": pct,
-            "equity": float(hero_results_row[sl].mean()),
-            "edge": {
-                "cards": ints_to_hand_str(hand),
-                "category": describe_category(hand, board5),
-            },
+        board5 = _compatible_board5(board_ints, rank_runouts_arr, hand)
+        edges.append({
+            "cards": ints_to_hand_str(hand),
+            # Essentially impossible with any real rank_runouts count, but
+            # never assumed: an empty label is a cosmetic gap, not a crash.
+            "category": describe_category(hand, board5) if board5 is not None else "",
         })
-    return rungs
+    return bucket_indices, edges
+
+
+def build_rungs(buckets, edges, equity_row):
+    """One rung per bucket: `edges[i]` (hero-independent, from Pass 1) +
+    `equity_row[i]` (this hero's Pass-2 equity for that bucket)."""
+    return [
+        {"bucket": pct, "equity": float(eq), "edge": edge}
+        for pct, edge, eq in zip(buckets, edges, equity_row)
+    ]
 
 
 def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
-                         trials=DEFAULT_TRIALS, seed=None,
+                         hands=DEFAULT_HANDS, rank_runouts=DEFAULT_RANK_RUNOUTS,
+                         trials_per_bucket=DEFAULT_TRIALS_PER_BUCKET, seed=None,
                          parallel=None, num_workers=None):
     """The whole feature: hero equity vs board-strength percentile slices.
 
-    `parallel`/`num_workers` pass straight through to evaluate_trials (see
-    its docstring); left at their defaults, sizing auto-decides from the
-    trial count, which is the right choice for normal callers. Exposed here
-    mainly for tests that need to force one path or a specific worker count
-    while holding every other input fixed.
+    Two passes (see the module docstring): Pass 1 (`hands` x `rank_runouts`)
+    ranks villain hands on shared runouts; Pass 2 (`trials_per_bucket` per
+    bucket, `len(buckets)` buckets) measures each hero's equity against
+    each bucket on fresh, independent, per-trial runouts.
 
-    Task 11: `trials` (default DEFAULT_TRIALS) replaces the old `hands` x
-    `runouts` grid entirely -- each of the `trials` Monte Carlo draws is one
-    complete, independent scenario (villain hand + board completion), not a
-    villain sampled once and then re-scored against a shared pool of
-    runouts. `rng` is used only for `sample_trials`.
+    `parallel`/`num_workers` pass straight through to both rank_hands and
+    evaluate_pass2 (see their docstrings); left at their defaults, sizing
+    auto-decides from the workload, which is the right choice for normal
+    callers. Exposed here mainly for tests that need to force one path or a
+    specific worker count while holding every other input fixed.
 
-    See spec Section 5 for the response shape (minus `runouts`, which no
-    longer has a meaning under joint sampling -- see task-11-report.md).
+    See spec Section 5 for the response shape; `rank_runouts` and
+    `trials_per_bucket` are additionally reported so the sampling effort
+    behind each number is visible (see task-13-brief.md).
     """
     board_ints = hand_str_to_ints(board)
     board_len = len(board_ints)
@@ -531,28 +763,56 @@ def compute_range_ladder(board, dead, heroes, buckets=DEFAULT_BUCKETS,
                                                 for i in range(0, len(board), 2)])
     rng = np.random.default_rng(seed)
 
-    trials_arr = sample_trials(deck, hole_count, board_len, trials, rng)
-    if trials_arr.shape[0] == 0:
-        raise ValueError("no legal trials remain")
+    # --- Pass 1: rank hands on shared runouts ---
+    villain_hands = sample_villains(deck, hole_count, hands, rng)
+    if villain_hands.shape[0] == 0:
+        raise ValueError("no legal villain hands remain")
 
-    villain_hands = trials_arr[:, :hole_count]
-    runouts = trials_arr[:, hole_count:]
+    rank_runouts_arr = sample_runouts(deck, board_len, rank_runouts, rng)
+    strength, eligible_counts = rank_hands(
+        villain_hands, board_ints, rank_runouts_arr, game, score_array,
+        parallel=parallel, num_workers=num_workers,
+    )
 
-    villain_scores, hero_results = evaluate_trials(
+    # Drop hands that were never eligible on any shared runout (collided
+    # with every one of them) -- their strength is meaningless, not 0.0 by
+    # merit. See rank_hands' docstring; essentially impossible in practice.
+    ranked = eligible_counts > 0
+    villain_hands = villain_hands[ranked]
+    strength = strength[ranked]
+    if villain_hands.shape[0] == 0:
+        raise ValueError("no ranked villain hands remain")
+
+    buckets_list = list(buckets)
+    bucket_indices, edges = _bucket_slices_and_edges(
+        strength, villain_hands, buckets_list, board_ints, rank_runouts_arr,
+    )
+
+    # --- Pass 2: stratified hero equity on independent runouts ---
+    trials_arr = sample_pass2_trials(
+        deck, board_len, hole_count, villain_hands, bucket_indices,
+        trials_per_bucket, rng,
+    )
+    _villain_scores, hero_results = evaluate_pass2(
         trials_arr, hero_arrays, board_ints, hole_count, game, score_array,
         parallel=parallel, num_workers=num_workers,
     )
+
+    h = hero_arrays.shape[0]
+    b = len(buckets_list)
+    equity = hero_results.reshape(h, b, trials_per_bucket).mean(axis=2)
 
     ladders = []
     for j, hero in enumerate(heroes):
         ladders.append({
             "id": hero["id"],
-            "rungs": build_rungs(villain_scores, hero_results[j], villain_hands,
-                                 runouts, list(buckets), board_ints),
+            "rungs": build_rungs(buckets_list, edges, equity[j]),
         })
 
     return {
-        "population": int(trials_arr.shape[0]),
+        "population": int(villain_hands.shape[0]),
         "exact": board_len == 5,
+        "rank_runouts": int(rank_runouts_arr.shape[0]),
+        "trials_per_bucket": int(trials_per_bucket),
         "ladders": ladders,
     }

@@ -16,7 +16,7 @@ from card_encoding import generate_deck_ints
 from hand_indexing import BINOMIAL, PLO4_BOARD_COMBOS
 from hand_rank_evaluator import _batch_best_score, _HAND_COMBOS, get_score_array
 import fast_score
-from range_ladder import sample_trials, score_hands
+from range_ladder import score_hands
 
 pytestmark = pytest.mark.skipif(
     not fast_score.HAVE_NUMBA, reason="numba not available on this platform"
@@ -24,6 +24,22 @@ pytestmark = pytest.mark.skipif(
 
 SCORE_ARRAY = get_score_array()
 GAMES = [("plo4", 4), ("plo5", 5), ("plo6", 6)]
+
+
+def _sample_joint(deck, hole_count, board_len, trials, rng):
+    """Local stand-in for Task 11's deleted `sample_trials`: `trials` joint
+    draws of hole_count + need DISTINCT cards from `deck` (first hole_count
+    columns = a hand, remaining `need` = a board completion). This file only
+    needs a generic "collision-impossible-by-construction" row generator to
+    exercise score_hands' numba-vs-numpy equivalence -- it is not testing
+    Task 13's ranking/equity sampling, so it does not need range_ladder's
+    public sampling API (which now expects a hand population + buckets, not
+    a bare joint draw)."""
+    deck = np.asarray(deck, dtype=np.int32)
+    need = 5 - board_len
+    num_cards = hole_count + need
+    draw = rng.random((trials, len(deck))).argsort(axis=1)[:, :num_cards]
+    return deck[draw].astype(np.int32)
 
 
 def _random_hands_and_boards(rng, num_cards, n):
@@ -131,7 +147,7 @@ def test_score_hands_numba_matches_numpy(game, num_cards, board_len):
     board_ints = deck[:board_len]
     remaining_deck = deck[board_len:]
 
-    trials_arr = sample_trials(remaining_deck, hole_count=num_cards, board_len=board_len,
+    trials_arr = _sample_joint(remaining_deck, hole_count=num_cards, board_len=board_len,
                                trials=777, rng=rng)  # 777: not a multiple of chunk=2000
     hands = trials_arr[:, :num_cards]
     need = 5 - board_len
@@ -170,7 +186,7 @@ def test_score_hands_numba_matches_numpy_broadcast_hero_tile(game, num_cards):
     board_ints = full[num_cards:num_cards + 3]
     remaining_deck = full[num_cards + 3:]
 
-    trials_arr = sample_trials(remaining_deck, hole_count=num_cards, board_len=3,
+    trials_arr = _sample_joint(remaining_deck, hole_count=num_cards, board_len=3,
                                trials=513, rng=rng)
     runouts = trials_arr[:, num_cards:]
     board_tile = np.broadcast_to(board_ints, (trials_arr.shape[0], 3)).astype(np.int32)

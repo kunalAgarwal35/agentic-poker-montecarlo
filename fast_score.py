@@ -66,9 +66,9 @@ if HAVE_NUMBA:
         involved anywhere: both paths index the same score_array with the
         same combinatorial index, so agreement must be exact).
 
-        No numba.prange here on purpose (see task-12-brief.md): the trial
-        chunks this gets called on are already parallelised across the
-        persistent ProcessPoolExecutor in range_ladder.evaluate_trials.
+        No numba.prange here on purpose (see task-12-brief.md): the chunks
+        this gets called on are already parallelised across the persistent
+        ProcessPoolExecutor in range_ladder.rank_hands / evaluate_pass2.
         Adding threads inside a single worker process on top of that
         oversubscribes the box and, per the brief, usually makes it
         slower rather than faster. This kernel stays single-threaded;
@@ -166,7 +166,7 @@ def warmup(score_array=None):
 
     Numba specializes (and, with cache=True, separately disk-caches) per
     argument *layout* (C-contiguous vs. general-strided/broadcast), not
-    just per dtype+ndim. range_ladder._evaluate_trials_chunk passes:
+    just per dtype+ndim. range_ladder._evaluate_pass2_chunk passes:
       - a broadcast (stride-0) `hands` array for the hero side
         (np.broadcast_to(heroes[j], (t, hole_count))),
       - a non-contiguous column-sliced `hands` array for the villain side

@@ -50,9 +50,10 @@ _warmup_started = False
 def _warmup():
     """Trigger numba JIT compilation in the background so the first real /pql or
     /pql-graph request isn't paying the (~30-90s) compile cost. Also warms the
-    persistent process pool (Task 10) that range_ladder.evaluate_trials
-    parallelises onto, so the first range-ladder request doesn't pay the
-    ~5s-per-worker process-creation cost that the pool exists to avoid.
+    persistent process pool (Task 10) that range_ladder's rank_hands (Pass 1)
+    and evaluate_pass2 (Pass 2) parallelise onto, so the first range-ladder
+    request doesn't pay the ~5s-per-worker process-creation cost that the
+    pool exists to avoid.
 
     Task 12: also warms fast_score's numba scoring kernel directly, in THIS
     process, as its own try/except -- independent of warmup_pool() below
