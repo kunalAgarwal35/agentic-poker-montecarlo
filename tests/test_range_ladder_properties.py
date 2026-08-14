@@ -1,4 +1,18 @@
-from range_ladder import compute_range_ladder
+from itertools import combinations
+
+import numpy as np
+
+from card_encoding import generate_deck_ints, hand_str_to_ints, ints_to_hand_str
+from hand_rank_evaluator import get_score_array
+from range_ladder import (
+    DEFAULT_BUCKETS,
+    _bucket_slices_and_edges,
+    compute_range_ladder,
+    rank_hands,
+    sample_runouts,
+    sample_villains,
+    score_hands,
+)
 
 # Fixture deliberately differs from the task-7 brief's literal example
 # (board="6s7s4s", dead=["AsKs9h2c", "QhJhTd3d"]). That fixture is legal
@@ -100,35 +114,205 @@ def test_equity_is_monotonic_in_bucket_width():
         assert eq == sorted(eq), f"{lad['id']}: {eq}"
 
 
+# ---------------------------------------------------------------------------
+# Spec section 9, "Identity": hero equity vs the top 100% bucket must equal
+# plain equity against a random hand, computed independently.
+#
+# The previous version of this test asserted `0.0 <= equity <= 1.0` and
+# called it a recomputation. `equity` is the mean of a hero_results row whose
+# entries come from {0.0, 0.5, 1.0}, so that assertion cannot fail for any
+# value the code can produce -- the final review killed it by mutation
+# (scaling bucket-100 equity by 0.5 and by 0.8 both left it PASSING). This
+# version recomputes the quantity for real.
+#
+# Fixture: the live deck is shrunk to 12 cards, so that the villain
+# POPULATION is the complete C(12,4) = 495-hand space (sample_villains'
+# exhaustive branch) and every one of its C(8,2) = 28 compatible runouts can
+# be enumerated. The reference is therefore EXACT -- a full enumeration with
+# no Monte Carlo error of its own -- and it is exactly the quantity Pass 2
+# estimates: draw a villain uniformly from the bucket, then a runout
+# uniformly from the ones compatible with it. Every hand has the same 28
+# compatible runouts, so that two-stage average is well defined.
+#
+# The board is 3s4s5s and the live cards hold no spades, which makes the
+# three heroes span the range instead of all sitting at an extreme:
+# "straight" is exactly 1.0, "pair" is ~0.49 (the value that actually
+# constrains), "low" is ~0.33.
+# ---------------------------------------------------------------------------
+
+IDENT_BOARD = "3s4s5s"
+IDENT_LIVE = ["Ah", "Kh", "Qh", "9h", "8h", "7h", "Ad", "Kd", "9d", "8d", "7d", "2c"]
+IDENT_HEROES = [
+    {"id": "straight", "cards": "6d7cQcJs"},
+    {"id": "pair", "cards": "TcTdJhJd"},
+    {"id": "low", "cards": "6h6cKcQs"},
+]
+# Pass-2 trials per bucket for the Identity fixture. Sets the tolerance
+# below; see its derivation there.
+IDENT_TRIALS = 8000
+
+
+def _identity_dead():
+    """`dead` for the Identity fixture: every hero, plus one blocker entry
+    holding every card that is neither on the board, nor in a hero, nor in
+    IDENT_LIVE -- which is what shrinks the live deck to exactly 12 cards."""
+    used = {IDENT_BOARD[i:i + 2] for i in range(0, len(IDENT_BOARD), 2)}
+    for h in IDENT_HEROES:
+        used |= {h["cards"][i:i + 2] for i in range(0, len(h["cards"]), 2)}
+    full = ints_to_hand_str(generate_deck_ints([]))
+    blocker = [full[i:i + 2] for i in range(0, len(full), 2)
+              if full[i:i + 2] not in used and full[i:i + 2] not in IDENT_LIVE]
+    return [h["cards"] for h in IDENT_HEROES] + ["".join(blocker)]
+
+
+def _exact_equity_versus_the_whole_population(hero_cards):
+    """Hero equity against a uniformly random villain hand on a uniformly
+    random compatible runout, by EXHAUSTIVE enumeration -- no sampling.
+
+    Deliberately independent of Pass 2: it builds every (villain hand,
+    compatible runout) pair itself and averages hero's win/tie/loss, rather
+    than reusing sample_pass2_trials/evaluate_pass2 (which would only prove
+    the ladder agrees with itself). It does share `score_hands`, whose
+    numba-vs-numpy equivalence is pinned separately in test_fast_score.py --
+    what is under test here is the equity denominator and the per-bucket
+    aggregation, not the scoring kernel.
+    """
+    board_ints = hand_str_to_ints(IDENT_BOARD)
+    deck = sorted(hand_str_to_ints("".join(IDENT_LIVE)).tolist())
+    hero = hand_str_to_ints(hero_cards)
+    all_runouts = list(combinations(deck, 2))
+
+    hands, boards, per_hand_counts = [], [], []
+    for villain in combinations(deck, 4):
+        held = set(villain)
+        compatible = [r for r in all_runouts if not held & set(r)]
+        per_hand_counts.append(len(compatible))
+        for runout in compatible:
+            hands.append(villain)
+            boards.append(board_ints.tolist() + list(runout))
+    # Every hand blocks the same number of runouts (hole_count is constant),
+    # so the per-hand averages below all carry equal weight.
+    assert len(set(per_hand_counts)) == 1, per_hand_counts[:5]
+
+    hands = np.array(hands, dtype=np.int32)
+    boards = np.array(boards, dtype=np.int32)
+    hero_tile = np.broadcast_to(hero, (hands.shape[0], hero.size))
+    score_array = get_score_array()
+    villain_scores = score_hands(hands, boards, "plo4", score_array)
+    hero_scores = score_hands(hero_tile, boards, "plo4", score_array)
+    results = np.where(hero_scores > villain_scores, 1.0,
+                      np.where(hero_scores == villain_scores, 0.5, 0.0))
+    per_hand = results.reshape(-1, per_hand_counts[0]).mean(axis=1)
+    return float(per_hand.mean())
+
+
 def test_top_100_percent_equals_equity_versus_a_random_hand():
-    """Independent check of the equity denominator."""
-    out = _ladder()
-    for lad in out["ladders"]:
-        rung100 = [r for r in lad["rungs"] if r["bucket"] == 100][0]
-        # recompute directly: mean hero equity over the whole population
-        assert 0.0 <= rung100["equity"] <= 1.0
-    nuts = [l for l in out["ladders"] if l["id"] == "nuts"][0]["rungs"]
-    air = [l for l in out["ladders"] if l["id"] == "air"][0]["rungs"]
-    top100 = {r["bucket"]: r["equity"] for r in nuts}[100]
-    assert top100 > {r["bucket"]: r["equity"] for r in air}[100]
+    """Spec section 9's "Identity" property, recomputed independently.
+
+    Tolerance derivation: the bucket-100 rung is the mean of IDENT_TRIALS
+    i.i.d. Pass-2 trials, each a draw from {0.0, 0.5, 1.0}. Any random
+    variable supported on [0, 1] has variance <= 1/4, so sd <= 0.5 and the
+    standard error of that mean is at most 0.5/sqrt(IDENT_TRIALS)
+    (= 0.0056 at 8,000). The reference is an exhaustive enumeration and
+    contributes no error of its own, so 4 standard errors --
+    2/sqrt(IDENT_TRIALS) = 0.0224 -- is the whole budget. Four sigma rather
+    than three because this is a merge gate, not a research result; the
+    fixture is seeded end to end, so the test is deterministic anyway and
+    the sigma count only says how much genuine sampling slack is allowed
+    before a real discrepancy is called.
+
+    Verified to bite: scaling the production bucket equities by 0.9 moves
+    "pair" by 0.049 and "straight" by 0.100, both well outside 0.0224, and
+    the test fails on both. The old tautology survived a 0.5x scaling.
+    """
+    tolerance = 4 * 0.5 / np.sqrt(IDENT_TRIALS)
+    out = compute_range_ladder(
+        board=IDENT_BOARD, dead=_identity_dead(), heroes=IDENT_HEROES,
+        hands=1000, rank_runouts=40, trials_per_bucket=IDENT_TRIALS, seed=5,
+    )
+    # The population must really be the whole enumerated space -- otherwise
+    # the reference below is answering a different question.
+    assert out["population"] == 495, out["population"]
+
+    for hero, lad in zip(IDENT_HEROES, out["ladders"]):
+        assert lad["id"] == hero["id"]
+        measured = [r["equity"] for r in lad["rungs"] if r["bucket"] == 100][0]
+        expected = _exact_equity_versus_the_whole_population(hero["cards"])
+        assert abs(measured - expected) <= tolerance, (
+            f"{hero['id']}: bucket-100 equity {measured:.5f} vs exhaustive "
+            f"head-to-head {expected:.5f} (tolerance {tolerance:.5f})"
+        )
+
+    # The three heroes must also be spread out, so the check above is a
+    # comparison of real numbers and not three coincidences near 0 or 1.
+    by_id = {l["id"]: {r["bucket"]: r["equity"] for r in l["rungs"]}
+             for l in out["ladders"]}
+    assert by_id["straight"][100] > by_id["pair"][100] > by_id["low"][100]
 
 
 def test_boundary_hands_are_distinct_across_buckets():
-    # Named for what it actually checks, not for what the brief's original
-    # name ("...strength_falls_as_buckets_widen") promised. The returned
-    # rungs expose each boundary hand's cards/category but not its
-    # `strength` value -- that number lives only inside build_rungs' local
-    # `strength` array and is never returned by compute_range_ladder -- so
-    # there is nothing in the public response to assert non-increasing
-    # strength against without reimplementing (part of) the sampling
-    # pipeline separately from compute_range_ladder and hoping it lines up.
-    # Per review guidance this is the documented fallback: a renamed test
-    # matching its weaker, actually-checked assertion, flagged in
-    # task-7-report.md, rather than inventing a new accessor on
-    # range_ladder.py to satisfy the original name.
+    # The weak half of spec section 9's "Boundary ordering": the edges must
+    # at least not all be the same hand. The ordering itself -- the property
+    # that actually matters -- is checked directly below, in
+    # test_edge_hand_strength_is_non_increasing_as_buckets_widen. This one
+    # stays because it is the only check that runs against
+    # compute_range_ladder's PUBLIC response rather than against the
+    # module-level functions, so it would catch an edge that never reaches
+    # the rungs. (Its earlier comment claimed the ordering was untestable
+    # because "strength lives only inside build_rungs" -- that was wrong on
+    # two counts: build_rungs never receives `strength` at all, and
+    # `_bucket_slices_and_edges`, which does, is module-level and directly
+    # callable. Final review, Finding 5.)
     out = _ladder()
     rungs = out["ladders"][0]["rungs"]
     assert len({r["edge"]["cards"] for r in rungs}) > 1
+
+
+def test_edge_hand_strength_is_non_increasing_as_buckets_widen():
+    """Spec section 9, "Boundary ordering": each bucket's edge hand is the
+    WEAKEST hand in a cumulative top-pct slice, so widening the bucket can
+    only admit weaker hands -- the edge's own Pass-1 strength must never go
+    UP as pct grows.
+
+    Runs Pass 1 through its module-level entry points (`sample_villains` /
+    `sample_runouts` / `rank_hands`) and then hands the resulting
+    `strength` to the very function compute_range_ladder uses to slice it,
+    `_bucket_slices_and_edges`, so this asserts against production code
+    rather than a reimplementation of it. That is also why the edges'
+    reported cards are cross-checked against the slice indices below: it
+    pins that the strength being asserted on belongs to the hand the
+    response actually names.
+    """
+    board_ints = hand_str_to_ints(FLOP)
+    dead_cards = [d[i:i + 2] for d in DEAD for i in range(0, len(d), 2)]
+    board_cards = [FLOP[i:i + 2] for i in range(0, len(FLOP), 2)]
+    deck = generate_deck_ints(dead_cards + board_cards)
+
+    rng = np.random.default_rng(5)
+    villain_hands = sample_villains(deck, 4, 3000, rng)
+    runouts = sample_runouts(deck, len(board_ints), 20, rng)
+    strength, counts = rank_hands(villain_hands, board_ints, runouts,
+                                  "plo4", get_score_array())
+    ranked = counts > 0
+    villain_hands, strength = villain_hands[ranked], strength[ranked]
+
+    buckets = list(DEFAULT_BUCKETS)                # 5, 15, 25, 40, 60, 100
+    assert buckets == sorted(buckets), "this test assumes widening buckets"
+    bucket_indices, edges = _bucket_slices_and_edges(
+        strength, villain_hands, buckets, board_ints, runouts,
+    )
+
+    edge_strengths = [float(strength[idx[-1]]) for idx in bucket_indices]
+    assert all(a >= b for a, b in zip(edge_strengths, edge_strengths[1:])), (
+        f"edge strengths rose as buckets widened: "
+        f"{list(zip(buckets, edge_strengths))}"
+    )
+    # ...and it really is the reported edge hand's strength.
+    for idx, edge in zip(bucket_indices, edges):
+        assert ints_to_hand_str(villain_hands[idx[-1]]) == edge["cards"]
+    # Not a flat line: at least one strictly decreasing step, so the
+    # assertion above is doing work rather than comparing a constant.
+    assert edge_strengths[0] > edge_strengths[-1], edge_strengths
 
 
 def test_ranking_is_hero_independent():
