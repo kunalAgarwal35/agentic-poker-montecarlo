@@ -45,19 +45,32 @@ COPY score_array.npy category_array.npy \
      holdem_class_order.json plo4_class_order.json plo5_class_order.json ./
 
 ENV PORT=8080
-# Keep memory bounded on a small (e.g. 512MB) host: single numba thread, an
-# on-disk JIT cache (so restarts re-use compiled code), and limited waitress
-# concurrency so simultaneous Monte-Carlo requests can't pile up allocations.
+# One numba thread per worker and an on-disk JIT cache (so restarts re-use
+# compiled code). Parallelism lives at the PROCESS level (the pool below);
+# threads inside a worker on top of that would only oversubscribe the box.
 ENV NUMBA_NUM_THREADS=1
 ENV NUMBA_CACHE_DIR=/tmp/numba-cache
 # /range_ladder's process pool. MUST be set here: range_ladder defaults to
 # os.cpu_count(), which inside a container reports the HOST's core count and
 # not the cgroup limit -- 24 workers were observed on a box entitled to a
 # fraction of one. Each worker is a separate interpreter holding numpy, numba
-# and the 21MB score_array, so an unset value is an OOM kill. Matches the
-# --threads=2 below: at most two requests are in flight, so more pools than
-# that buys nothing.
-ENV RANGE_LADDER_POOL_WORKERS=2
+# and the 21MB score_array, so an unset value is an OOM kill.
+#
+# Sized to the replica's actual allocation: 8 vCPU / 8GB. At ~300MB per worker
+# that peaks near 2.4GB, comfortably inside 8GB.
+#
+# It was 2, on the stated grounds that it should "match the --threads=2 below:
+# at most two requests are in flight, so more pools than that buys nothing".
+# That conflates two independent knobs. --threads is how many REQUESTS waitress
+# handles at once; this is how many cores ONE request may fan out across, since
+# rank_hands splits its runouts into `workers` chunks. Matching them pinned the
+# engine to 2 of 8 available vCPU and made Pass 1 -- ~65% of an off-river
+# request, and fully parallel -- four times longer than it needed to be.
+#
+# It also made the two settings fight: the pool is a single global executor
+# shared by every request, so two concurrent requests contended for the same
+# two workers rather than using idle cores.
+ENV RANGE_LADDER_POOL_WORKERS=8
 ENV OMP_NUM_THREADS=1
 ENV OPENBLAS_NUM_THREADS=1
 EXPOSE 8080
