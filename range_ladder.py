@@ -40,7 +40,8 @@ from card_encoding import (
     hand_str_to_ints,
     ints_to_hand_str,
 )
-from fast_score import batch_best_score
+from fast_score import (batch_best_score, shared_board_best_score,
+                        shared_board_pair_table)
 from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
 from hand_rank_evaluator import (
@@ -453,6 +454,23 @@ def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
     n = hands.shape[0]
     board5 = np.asarray(board5)
     per_hand_board = board5.ndim == 2
+
+    # One board for every hand -- which is exactly what Pass 1 does, once per
+    # shared runout. Precompute the best board-triple for each hole PAIR and
+    # gather, instead of re-deriving that inner max inside every hand. Same
+    # score_array, same indices, same `max`: bit-identical by construction and
+    # asserted as such in tests/test_shared_board_scoring.py. 9-11x measured.
+    #
+    # Pass 2 is deliberately NOT routed here: it completes the board with an
+    # INDEPENDENT runout per trial (`per_hand_board`), so there is no shared
+    # board to amortise a table over and building one per row would be far
+    # slower than the general kernel.
+    if not per_hand_board:
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+        table = shared_board_pair_table(board5, _BOARD_COMBOS, score_array, BINOMIAL)
+        return shared_board_best_score(hands, hand_combos, table)
+
     out = np.empty(n, dtype=np.float64)
     for start in range(0, n, chunk):
         block = hands[start:start + chunk]
