@@ -40,7 +40,8 @@ from card_encoding import (
     hand_str_to_ints,
     ints_to_hand_str,
 )
-from fast_score import batch_best_score
+from fast_score import (batch_best_score, shared_board_best_score,
+                        shared_board_code_table, shared_board_pair_table)
 from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
 from hand_rank_evaluator import (
@@ -57,6 +58,22 @@ from process_pool import get_global_executor
 from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
+
+# Sorted unique score_array values -- 7,462 of them across 2,598,960 entries.
+# Pass 1 carries each hand's rank CODE (index into this) rather than its score:
+# a strictly monotone relabelling, so it orders and ties identically, while
+# turning the ranking reduction's per-runout sort into a bincount and shrinking
+# the matrix shipped between pool workers from float64 to int16.
+# Built once per process, never per request.
+_SCORE_VALUES = None
+
+
+def score_values():
+    """The sorted unique score_array values (cached)."""
+    global _SCORE_VALUES
+    if _SCORE_VALUES is None:
+        _SCORE_VALUES = np.unique(get_score_array())
+    return _SCORE_VALUES
 
 # --- Pass 1 defaults: rank hands on shared runouts ---------------------
 #
@@ -453,6 +470,23 @@ def score_hands(hands, board5, game, score_array, chunk=2000, use_numba=None):
     n = hands.shape[0]
     board5 = np.asarray(board5)
     per_hand_board = board5.ndim == 2
+
+    # One board for every hand -- which is exactly what Pass 1 does, once per
+    # shared runout. Precompute the best board-triple for each hole PAIR and
+    # gather, instead of re-deriving that inner max inside every hand. Same
+    # score_array, same indices, same `max`: bit-identical by construction and
+    # asserted as such in tests/test_shared_board_scoring.py. 9-11x measured.
+    #
+    # Pass 2 is deliberately NOT routed here: it completes the board with an
+    # INDEPENDENT runout per trial (`per_hand_board`), so there is no shared
+    # board to amortise a table over and building one per row would be far
+    # slower than the general kernel.
+    if not per_hand_board:
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+        table = shared_board_pair_table(board5, _BOARD_COMBOS, score_array, BINOMIAL)
+        return shared_board_best_score(hands, hand_combos, table)
+
     out = np.empty(n, dtype=np.float64)
     for start in range(0, n, chunk):
         block = hands[start:start + chunk]
@@ -507,8 +541,15 @@ def _rank_chunk(villain_hands, board_ints, runouts_chunk, game, score_array):
     """
     hands = villain_hands.shape[0]
     r = runouts_chunk.shape[0]
-    scores = np.full((r, hands), np.nan, dtype=np.float64)
+    # int16 rank CODES with a -1 sentinel for ineligible cells, not float64
+    # scores with NaN. The reduction only ever compares and counts, so the code
+    # carries everything it needs (see score_values), and the matrix crossing
+    # the pool boundary is a quarter the size -- 36MB rather than 144MB at the
+    # shipped defaults.
+    codes = np.full((r, hands), -1, dtype=np.int16)
     eligible = np.empty((r, hands), dtype=bool)
+    values = score_values()
+    hand_combos = _HAND_COMBOS[game]
     for i, runout in enumerate(runouts_chunk):
         mask = eligible_mask(villain_hands, runout)
         eligible[i] = mask
@@ -517,8 +558,10 @@ def _rank_chunk(villain_hands, board_ints, runouts_chunk, game, score_array):
             continue
         board5 = (np.concatenate([board_ints, runout]) if runout.size
                  else np.asarray(board_ints)).astype(np.int32)
-        scores[i, idx] = score_hands(villain_hands[idx], board5, game, score_array)
-    return scores, eligible
+        table = shared_board_code_table(board5, _BOARD_COMBOS, score_array,
+                                        BINOMIAL, values)
+        codes[i, idx] = shared_board_best_score(villain_hands[idx], hand_combos, table)
+    return codes, eligible
 
 
 def _rank_chunk_worker(villain_hands, board_ints, runouts_chunk, game):
@@ -554,6 +597,7 @@ def _reduce_rank_scores(scores, eligible):
     r, n = scores.shape
     beat_sum = np.zeros(n, dtype=np.float64)
     beat_cnt = np.zeros(n, dtype=np.float64)
+    n_codes = int(score_values().size)
     for i in range(r):
         idx = np.flatnonzero(eligible[i])
         if idx.size < 2:
@@ -562,9 +606,17 @@ def _reduce_rank_scores(scores, eligible):
             # a realistic hand population and deck; skipped defensively.
             continue
         vs = scores[i, idx]
-        order = np.sort(vs)
-        lower = np.searchsorted(order, vs, side="left")     # strictly worse
-        upper = np.searchsorted(order, vs, side="right")
+        # Counting sort over rank codes, replacing a per-runout np.sort of
+        # ~43,000 values plus two searchsorted passes over it. `lower` and
+        # `upper` are the SAME integer counts either way -- number strictly
+        # worse, and number no better -- so `share` is built from identical
+        # integers and the result is bit-identical, which
+        # tests/test_reduce_rank_scores_parity.py pins against the previous
+        # implementation.
+        counts = np.bincount(vs, minlength=n_codes)
+        cum = np.cumsum(counts)
+        upper = cum[vs]                                       # <= this hand
+        lower = upper - counts[vs]                            # strictly worse
         ties = upper - lower - 1                              # excluding self
         share = (lower + 0.5 * ties) / (idx.size - 1)
         beat_sum[idx] += share
