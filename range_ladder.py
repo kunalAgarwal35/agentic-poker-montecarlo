@@ -775,10 +775,44 @@ def _evaluate_pass2_chunk(trials_arr, heroes, board_ints, hole_count, game, scor
 
     villain_scores = score_hands(villain_hands, boards, game, score_array)
 
+    # A hero's hand is FIXED for the whole request, so its score on a trial
+    # depends only on that trial's completed BOARD -- and the sampler draws far
+    # fewer distinct runouts than trials: measured 1,892 distinct across 300,000
+    # trials on a flop, and 43 across 300,000 on a turn. Scoring every hero on
+    # every trial therefore recomputed each (hero, board) pair ~159 times on the
+    # flop and ~6,977 times on the turn.
+    #
+    # Scoring each hero once per DISTINCT board and expanding through `inv`
+    # gives the identical float back -- same kernel, same hand, same board -- so
+    # this is bit-identical, and it is the villain side (a different hand every
+    # trial) that remains irreducible. Villain scores above are untouched.
+    #
+    # This is NOT the runout sharing the module docstring forbids: that rule is
+    # about the SAMPLE (Task 11 drew one runout set for every hand and got 5-7pp
+    # of correlated noise). Nothing here changes a draw, a trial, or a bucket --
+    # only how many times an identical evaluation is performed.
+    #
+    # The key encodes the runout AS DRAWN, so [A,B] and [B,A] may land in
+    # different groups. That costs a little dedup and nothing in correctness --
+    # both still score against the same 5 cards, since scoring sorts them.
+    if need == 0 or t == 0:
+        board_index = None
+    else:
+        keys = runouts[:, 0].astype(np.int64)
+        for k in range(1, need):
+            keys = keys * 52 + runouts[:, k]
+        _, first_idx, board_index = np.unique(keys, return_index=True, return_inverse=True)
+        boards_distinct = boards[first_idx]
+
     hero_results = np.empty((h, t), dtype=np.float64)
     for j in range(h):
-        hero_tile = np.broadcast_to(heroes[j], (t, hole_count))
-        hero_scores = score_hands(hero_tile, boards, game, score_array)
+        if board_index is None:
+            hero_tile = np.broadcast_to(heroes[j], (t, hole_count))
+            hero_scores = score_hands(hero_tile, boards, game, score_array)
+        else:
+            d = boards_distinct.shape[0]
+            hero_tile = np.broadcast_to(heroes[j], (d, hole_count))
+            hero_scores = score_hands(hero_tile, boards_distinct, game, score_array)[board_index]
         hero_results[j] = np.where(
             hero_scores > villain_scores, 1.0,
             np.where(hero_scores == villain_scores, 0.5, 0.0),
