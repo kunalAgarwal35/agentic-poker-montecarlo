@@ -41,7 +41,7 @@ from card_encoding import (
     ints_to_hand_str,
 )
 from fast_score import (batch_best_score, shared_board_best_score,
-                        shared_board_pair_table)
+                        shared_board_code_table, shared_board_pair_table)
 from hand_categories import CATEGORY_TOKENS
 from hand_indexing import BINOMIAL
 from hand_rank_evaluator import (
@@ -58,6 +58,22 @@ from process_pool import get_global_executor
 from optimized_evaluator import best5_category_omaha_numba, get_category_array
 
 DEFAULT_BUCKETS = (5, 15, 25, 40, 60, 100)
+
+# Sorted unique score_array values -- 7,462 of them across 2,598,960 entries.
+# Pass 1 carries each hand's rank CODE (index into this) rather than its score:
+# a strictly monotone relabelling, so it orders and ties identically, while
+# turning the ranking reduction's per-runout sort into a bincount and shrinking
+# the matrix shipped between pool workers from float64 to int16.
+# Built once per process, never per request.
+_SCORE_VALUES = None
+
+
+def score_values():
+    """The sorted unique score_array values (cached)."""
+    global _SCORE_VALUES
+    if _SCORE_VALUES is None:
+        _SCORE_VALUES = np.unique(get_score_array())
+    return _SCORE_VALUES
 
 # --- Pass 1 defaults: rank hands on shared runouts ---------------------
 #
@@ -525,8 +541,15 @@ def _rank_chunk(villain_hands, board_ints, runouts_chunk, game, score_array):
     """
     hands = villain_hands.shape[0]
     r = runouts_chunk.shape[0]
-    scores = np.full((r, hands), np.nan, dtype=np.float64)
+    # int16 rank CODES with a -1 sentinel for ineligible cells, not float64
+    # scores with NaN. The reduction only ever compares and counts, so the code
+    # carries everything it needs (see score_values), and the matrix crossing
+    # the pool boundary is a quarter the size -- 36MB rather than 144MB at the
+    # shipped defaults.
+    codes = np.full((r, hands), -1, dtype=np.int16)
     eligible = np.empty((r, hands), dtype=bool)
+    values = score_values()
+    hand_combos = _HAND_COMBOS[game]
     for i, runout in enumerate(runouts_chunk):
         mask = eligible_mask(villain_hands, runout)
         eligible[i] = mask
@@ -535,8 +558,10 @@ def _rank_chunk(villain_hands, board_ints, runouts_chunk, game, score_array):
             continue
         board5 = (np.concatenate([board_ints, runout]) if runout.size
                  else np.asarray(board_ints)).astype(np.int32)
-        scores[i, idx] = score_hands(villain_hands[idx], board5, game, score_array)
-    return scores, eligible
+        table = shared_board_code_table(board5, _BOARD_COMBOS, score_array,
+                                        BINOMIAL, values)
+        codes[i, idx] = shared_board_best_score(villain_hands[idx], hand_combos, table)
+    return codes, eligible
 
 
 def _rank_chunk_worker(villain_hands, board_ints, runouts_chunk, game):
@@ -572,6 +597,7 @@ def _reduce_rank_scores(scores, eligible):
     r, n = scores.shape
     beat_sum = np.zeros(n, dtype=np.float64)
     beat_cnt = np.zeros(n, dtype=np.float64)
+    n_codes = int(score_values().size)
     for i in range(r):
         idx = np.flatnonzero(eligible[i])
         if idx.size < 2:
@@ -580,9 +606,17 @@ def _reduce_rank_scores(scores, eligible):
             # a realistic hand population and deck; skipped defensively.
             continue
         vs = scores[i, idx]
-        order = np.sort(vs)
-        lower = np.searchsorted(order, vs, side="left")     # strictly worse
-        upper = np.searchsorted(order, vs, side="right")
+        # Counting sort over rank codes, replacing a per-runout np.sort of
+        # ~43,000 values plus two searchsorted passes over it. `lower` and
+        # `upper` are the SAME integer counts either way -- number strictly
+        # worse, and number no better -- so `share` is built from identical
+        # integers and the result is bit-identical, which
+        # tests/test_reduce_rank_scores_parity.py pins against the previous
+        # implementation.
+        counts = np.bincount(vs, minlength=n_codes)
+        cum = np.cumsum(counts)
+        upper = cum[vs]                                       # <= this hand
+        lower = upper - counts[vs]                            # strictly worse
         ties = upper - lower - 1                              # excluding self
         share = (lower + 0.5 * ties) / (idx.size - 1)
         beat_sum[idx] += share

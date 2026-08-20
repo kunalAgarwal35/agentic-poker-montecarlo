@@ -216,6 +216,31 @@ def shared_board_pair_table(board5, board_combos, score_array, binomial):
     return tbl
 
 
+def shared_board_code_table(board5, board_combos, score_array, binomial, score_values):
+    """`shared_board_pair_table`, but holding RANK CODES instead of scores.
+
+    `score_values` is the sorted unique score_array values (7,462 of them for
+    2,598,960 entries). A code is that value's index, so codes order exactly as
+    the scores do and tie exactly where the scores tie -- a strictly monotone
+    relabelling. `max` over codes therefore picks the same pair as `max` over
+    scores, and the ranking reduction downstream compares and counts only, never
+    arithmetic on the score VALUE, so nothing is lost by carrying the code.
+
+    The conversion is done here, on the 1,081 pair entries, rather than on the
+    ~43,000 scores of every runout: that is the whole economy. It lets Pass 1
+    carry an int16 matrix instead of float64 (a quarter of the IPC) and lets the
+    reduction count with bincount instead of sorting.
+
+    Board-card pairs keep a -1 sentinel, which stays below every real code
+    exactly as -1.0 stays below every real score.
+    """
+    tbl = shared_board_pair_table(board5, board_combos, score_array, binomial)
+    codes = np.full(tbl.shape, -1, dtype=np.int16)
+    real = tbl >= 0.0
+    codes[real] = np.searchsorted(score_values, tbl[real]).astype(np.int16)
+    return codes
+
+
 def shared_board_best_score(hands, hand_combos, pair_table):
     """Best score per hand, given a `shared_board_pair_table` for the board.
 
