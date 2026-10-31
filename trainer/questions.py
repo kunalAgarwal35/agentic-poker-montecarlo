@@ -147,7 +147,7 @@ def range_reads(fr: FlopRanges) -> list[dict]:
             if not tpl.applies(t):
                 continue
             a = fr.freq(pos, tpl)
-            if a <= 0:
+            if a < 0.1:  # unguessably rare (or impossible): teaches nothing
                 continue
             out.append(_q("range_reads", fr.game, fr.flop, f"{pos}-{tpl.id}",
                           kind="estimate", template=tpl.id, position=POSITIONS[pos],
