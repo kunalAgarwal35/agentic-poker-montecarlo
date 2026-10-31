@@ -35,3 +35,15 @@ CREATE TABLE IF NOT EXISTS rate_events (
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS rate_events_ts_idx ON rate_events (ts);
+
+-- PLO Trainer question feedback: one vote per (question, browser client).
+-- Matches ensureTrainerSchema() in web/lib/trainerFeedback.ts.
+CREATE TABLE IF NOT EXISTS trainer_feedback (
+  question_id TEXT NOT NULL,
+  template TEXT NOT NULL,
+  client_id TEXT NOT NULL,
+  vote TEXT NOT NULL,             -- 'up' | 'down'
+  ts TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (question_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS trainer_feedback_template_idx ON trainer_feedback (template);
