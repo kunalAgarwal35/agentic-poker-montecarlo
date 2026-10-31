@@ -82,7 +82,7 @@ describe('question bank + selection', () => {
     const { score } = await import('@/lib/trainerBank');
     const est = { kind: 'estimate', answer: 20 } as never;
     expect(score(est, 20)).toBe(100);
-    expect(score(est, 26)).toBe(Math.round(100 * Math.exp(-1)));
+    expect(score(est, 30)).toBe(Math.round(100 * Math.exp(-1))); // tol = max(3, 25% of 20) = 5
     expect(score({ kind: 'choice', correct: 1 } as never, 1)).toBe(100);
     expect(score({ kind: 'choice', correct: 1 } as never, 0)).toBe(0);
   });
