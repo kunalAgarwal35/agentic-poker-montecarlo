@@ -25,16 +25,19 @@ export type Question = {
   positions?: string[];
   hero?: string[];
   choices?: string[];
-  answer?: number;
+  /** Card removal: villain's frequency with a random hand (shown up front). */
   baseline?: number;
+  answer?: number;
   correct?: number;
   values?: number[];
+  /** Card removal: per hero card, change in villain's frequency (revealed after). */
+  effects?: number[];
 };
 
-/** What a player sees before answering: no answer fields. */
-export type PublicQuestion = Omit<Question, 'answer' | 'baseline' | 'correct' | 'values'>;
+/** What a player sees before answering: no answer fields (baseline is a prompt, not an answer). */
+export type PublicQuestion = Omit<Question, 'answer' | 'correct' | 'values' | 'effects'>;
 /** Revealed after the player answers. */
-export type Reveal = Pick<Question, 'answer' | 'baseline' | 'correct' | 'values'>;
+export type Reveal = Pick<Question, 'answer' | 'baseline' | 'correct' | 'values' | 'effects'>;
 
 const DIR = path.join(process.cwd(), 'data', 'trainer');
 
@@ -54,22 +57,31 @@ export function bank() {
 
 export function toPublic(q: Question): PublicQuestion {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { answer, baseline, correct, values, ...rest } = q;
+  const { answer, correct, values, effects, ...rest } = q;
   return rest;
 }
 
 export function reveal(q: Question): Reveal {
-  return { answer: q.answer, baseline: q.baseline, correct: q.correct, values: q.values };
+  return { answer: q.answer, baseline: q.baseline, correct: q.correct, values: q.values, effects: q.effects };
 }
 
-/** Same formula as the trainer's practice mode (src/lib/scoring.ts). */
-export function score(q: Question, guess: number): number {
+/**
+ * Points 0..100, same formula as the trainer (src/lib/trainer/scoring.ts).
+ * Estimates are graded relative to the answer: within +-5% of it is Correct
+ * (100); within +-20% is Close (90 down to 50); beyond that Wrong (0).
+ * Card removal: guessing the wrong direction vs the random-hand baseline
+ * scores 0 -- the direction is the lesson. Choices: all or nothing.
+ */
+export function score(q: Pick<Question, 'kind' | 'answer' | 'baseline' | 'correct'>, guess: number): number {
   if (q.kind === 'choice') return guess === q.correct ? 100 : 0;
   const answer = q.answer ?? 0;
-  // 25% of the answer, kept within 3..6 points: lenient on small answers,
-  // but a big miss on a big answer (equity) still scores near zero.
-  const tol = Math.min(6, Math.max(3, answer * 0.25));
-  return Math.round(100 * Math.exp(-Math.abs(guess - answer) / (2 * tol)));
+  if (q.baseline !== undefined && Math.sign(guess - q.baseline) !== Math.sign(answer - q.baseline)) return 0;
+  if (answer <= 0) return guess === 0 ? 100 : 0;
+  const r = Math.abs(guess - answer) / answer;
+  if (r <= 0.05 + 1e-9) return 100;
+  // Close (within 20%): 90 down to 50. Beyond that it's Wrong: 0.
+  if (r <= 0.2 + 1e-9) return Math.round(90 - (40 * (r - 0.05)) / 0.15);
+  return 0;
 }
 
 type Tally = { up: number; down: number };

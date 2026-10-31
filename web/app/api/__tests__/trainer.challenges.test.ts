@@ -78,12 +78,20 @@ describe('challenge input parsing', () => {
 });
 
 describe('question bank + selection', () => {
-  it('server scoring matches the trainer formula', async () => {
+  it('server scoring: relative +-5% band, card-removal direction', async () => {
     const { score } = await import('@/lib/trainerBank');
-    const est = { kind: 'estimate', answer: 20 } as never;
-    expect(score(est, 20)).toBe(100);
-    expect(score(est, 30)).toBe(Math.round(100 * Math.exp(-1))); // tol = clamp(25% of 20, 3, 6) = 5
-    expect(score({ kind: 'estimate', answer: 68 } as never, 25)).toBeLessThan(5);
+    const est = (answer: number, baseline?: number) => ({ kind: 'estimate', answer, baseline }) as never;
+    expect(score(est(20), 20)).toBe(100);
+    expect(score(est(20), 21)).toBe(100);   // 5% of 20 = 1
+    expect(score(est(20), 19)).toBe(100);
+    expect(score(est(20), 21.2)).toBe(87);  // 6% off: Close
+    expect(score(est(20), 24)).toBe(50);    // 20% off: still Close
+    expect(score(est(20), 24.2)).toBe(0);   // 21% off: Wrong
+    expect(score(est(60), 63)).toBe(100);   // 5% of 60 = 3
+    expect(score(est(60), 66)).toBe(77);    // 10% off
+    // Card removal: baseline 8.5, answer 1.6 (your hand makes it less likely)
+    expect(score(est(1.6, 8.5), 9)).toBe(0); // said "more likely": wrong direction
+    expect(score(est(1.6, 8.5), 1.6)).toBe(100);
     expect(score({ kind: 'choice', correct: 1 } as never, 1)).toBe(100);
     expect(score({ kind: 'choice', correct: 1 } as never, 0)).toBe(0);
   });
@@ -102,7 +110,7 @@ describe('question bank + selection', () => {
     const { bank, toPublic } = await import('@/lib/trainerBank');
     for (const q of bank().all.slice(0, 50)) {
       const p = toPublic(q) as Record<string, unknown>;
-      for (const k of ['answer', 'baseline', 'correct', 'values']) expect(p).not.toHaveProperty(k);
+      for (const k of ['answer', 'correct', 'values', 'effects']) expect(p).not.toHaveProperty(k);
     }
   });
 });

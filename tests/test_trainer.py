@@ -109,7 +109,7 @@ def test_range_reads_questions(fr):
     qs = range_reads(fr)
     assert {q["position"] for q in qs} == {"UTG", "MP", "CO", "BTN", "SB"}
     assert len({q["id"] for q in qs}) == len(qs)
-    assert all(0 < q["answer"] <= 100 and q["kind"] == "estimate" for q in qs)
+    assert all(1 <= q["answer"] <= 100 and q["kind"] == "estimate" for q in qs)
 
 
 def test_card_removal_answers_are_exact(fr):
@@ -121,7 +121,12 @@ def test_card_removal_answers_are_exact(fr):
         assert q["baseline"] == pytest.approx(fr.freq(pos, tpl), abs=0.01)
         assert q["answer"] == pytest.approx(fr.freq(pos, tpl, cards("".join(q["hero"]))), abs=0.01)
         assert abs(q["answer"] - q["baseline"]) >= 1.5
+        assert q["answer"] >= 1.0 and q["baseline"] >= 1.0      # relative +-5% band must be hittable
         assert not set(q["hero"]) & set(q["board"])
+        # Per-card effects, in the hero order shown to the player.
+        assert len(q["effects"]) == len(q["hero"])
+        for c, d in zip(q["hero"], q["effects"]):
+            assert d == pytest.approx(fr.freq(pos, tpl, cards(c)) - q["baseline"], abs=0.01)
 
 
 def test_range_vs_range_correct_matches_values(fr):
