@@ -83,7 +83,7 @@ def _board(flop):
 
 
 def _hand(h):
-    return [card_str(int(c)) for c in sorted(h, key=lambda c: (-(c // 4), c % 4))]
+    return [card_str(c) for c in _sorted_hand(h)]
 
 
 def _q(mode, game, flop, key, **kw) -> dict:
@@ -147,13 +147,25 @@ def range_reads(fr: FlopRanges) -> list[dict]:
             if not tpl.applies(t):
                 continue
             a = fr.freq(pos, tpl)
-            if a < 0.1:  # unguessably rare (or impossible): teaches nothing
+            if a < 1.0:  # graded within +-5% of the answer: under 1% is unhittable
                 continue
             out.append(_q("range_reads", fr.game, fr.flop, f"{pos}-{tpl.id}",
                           kind="estimate", template=tpl.id, position=POSITIONS[pos],
                           prompt=f"How often does {POSITIONS[pos]}'s range have {tpl.noun}?",
                           definition=tpl.explain, answer=round(a, 2)))
     return out
+
+
+def card_effects(fr: "FlopRanges", pos: str, tpl: Template, hero: np.ndarray, base: float) -> list[float]:
+    """Per hero card: change (points) in villain's frequency from that card alone.
+
+    Negative = the card blocks villain's hits (fewer); positive = it removes
+    villain hands that miss, so the hits make up more of what's left."""
+    return [round(fr.freq(pos, tpl, [int(c)]) - base, 2) for c in _sorted_hand(hero)]
+
+
+def _sorted_hand(h):
+    return sorted((int(c) for c in h), key=lambda c: (-(c // 4), c % 4))
 
 
 def card_removal(fr: FlopRanges, rng: np.random.Generator, per_flop: int = 6, n_heroes: int = 120) -> list[dict]:
@@ -195,7 +207,7 @@ def card_removal(fr: FlopRanges, rng: np.random.Generator, per_flop: int = 6, n_
         for tid, (score, hero) in best.items():
             cands.append((score, pos, TEMPLATE_BY_ID[tid], hero))
     cands.sort(key=lambda c: -c[0])
-    out, seen, used_heroes, blockouts = [], set(), set(), 0
+    out, seen, used_heroes = [], set(), set()
     for _, pos, tpl, hero in cands:
         key = tuple(hero.tolist())
         if tpl.id in seen or key in used_heroes or len(out) >= per_flop:
@@ -203,18 +215,20 @@ def card_removal(fr: FlopRanges, rng: np.random.Generator, per_flop: int = 6, n_
         base, with_ = fr.freq(pos, tpl), fr.freq(pos, tpl, hero.tolist())
         if abs(with_ - base) < 1.5:  # subsample noise; skip
             continue
-        if with_ < 0.05:
-            if blockouts:
-                continue
-            blockouts += 1
+        if with_ < 1.0 or base < 1.0:
+            # Answers are graded within +-5% of the answer; under 1% that band
+            # is too thin to hit (and a total blockout has no relative band).
+            continue
         seen.add(tpl.id)
         used_heroes.add(key)
         hero_s = _hand(hero)
         out.append(_q("card_removal", fr.game, fr.flop, f"{pos}-{tpl.id}-{''.join(hero_s)}",
                       kind="estimate", template=tpl.id, position=POSITIONS[pos], hero=hero_s,
-                      prompt=f"You hold this hand. How often does {POSITIONS[pos]}'s range have {tpl.noun} now?",
-                      definition=tpl.explain + " Villain combos that use any of your cards are impossible.",
-                      answer=round(with_, 2), baseline=round(base, 2)))
+                      prompt=f"With your hand, how often does {POSITIONS[pos]}'s range have {tpl.noun}?",
+                      definition=tpl.explain + " Villain combos that use any of your cards are impossible. "
+                                 "'Random hand' is the frequency when you hold no particular cards.",
+                      answer=round(with_, 2), baseline=round(base, 2),
+                      effects=card_effects(fr, pos, tpl, hero, base)))
     return out
 
 

@@ -40,7 +40,7 @@ def sample_flops(n: int, seed: int = 7) -> list[list[int]]:
     return out
 
 
-def build(flops: int, seed: int) -> dict[str, list[dict]]:
+def build(flops: int, seed: int, modes: list[str] | None = None) -> dict[str, list[dict]]:
     banks: dict[str, list[dict]] = {}
     all_flops = sample_flops(flops, seed)
     for game in GAMES:
@@ -49,6 +49,8 @@ def build(flops: int, seed: int) -> dict[str, list[dict]]:
             t0 = time.time()
             fr = FlopRanges(game, flop)
             for mode, gen in MODES.items():
+                if modes and mode not in modes:
+                    continue
                 # Spread the more expensive modes over a subset of flops.
                 if i >= round(FLOPS_PER_MODE[mode] * len(all_flops)):
                     continue
@@ -62,8 +64,9 @@ def main():
     ap.add_argument("--out", action="append", required=True)
     ap.add_argument("--flops", type=int, default=60)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--modes", nargs="*", help="only rebuild these modes (default: all)")
     a = ap.parse_args()
-    banks = build(a.flops, a.seed)
+    banks = build(a.flops, a.seed, a.modes)
     for d in a.out:
         Path(d).mkdir(parents=True, exist_ok=True)
         for name, qs in banks.items():
