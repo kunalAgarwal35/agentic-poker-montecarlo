@@ -66,7 +66,7 @@ export function reveal(q: Question): Reveal {
 export function score(q: Question, guess: number): number {
   if (q.kind === 'choice') return guess === q.correct ? 100 : 0;
   const answer = q.answer ?? 0;
-  const tol = Math.max(2, answer * 0.15);
+  const tol = Math.max(3, answer * 0.25);
   return Math.round(100 * Math.exp(-Math.abs(guess - answer) / (2 * tol)));
 }
 
